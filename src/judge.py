@@ -9,6 +9,8 @@ against a 13.6% majority baseline.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 INTENTS = {
@@ -61,24 +63,48 @@ class Judge:
         self.repo = repo
         self.temperature = 1.3
         self._loaded = False
+        # RLock, not Lock: warm() holds it across the whole dummy forward, and judge()
+        # inside that same call re-enters _load(). One lock guards both the load and the
+        # first forward, so a warm-up and a real judgment can never run a forward at the
+        # same time — they queue up instead.
+        self._load_lock = threading.RLock()
 
     def _load(self):
         if self._loaded:
             return
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        # Double-checked: the warm-up thread and the first real message can both get here
+        # at once, and two concurrent from_pretrained calls would load the model twice.
+        # The loser of the race just waits on the lock until the winner is done.
+        with self._load_lock:
+            if self._loaded:
+                return
+            from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        t = self.torch
-        self.tok = AutoTokenizer.from_pretrained(self.repo)
-        # float16, not bfloat16: MPS takes the slow path for bf16 (limited op coverage) and
-        # it costs exactly 2x here — measured on this model, same prompt, three runs each:
-        # bf16 1352/1393/1467 ms vs fp16 734/745/827 ms. The judge is the single biggest
-        # steady-state cost in the pipeline, so this is the difference between a ~3 s and a
-        # ~4 s reply. CPU has no fp16 win, so it stays fp32.
-        dtype = t.float16 if self.device == "mps" else t.float32
-        self.model = AutoModelForCausalLM.from_pretrained(self.repo, dtype=dtype).to(self.device).eval()
-        self._letters = [self.tok.encode(c, add_special_tokens=False)[0]
-                         for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
-        self._loaded = True
+            t = self.torch
+            self.tok = AutoTokenizer.from_pretrained(self.repo)
+            # float16, not bfloat16: MPS takes the slow path for bf16 (limited op coverage) and
+            # it costs exactly 2x here — measured on this model, same prompt, three runs each:
+            # bf16 1352/1393/1467 ms vs fp16 734/745/827 ms. The judge is the single biggest
+            # steady-state cost in the pipeline, so this is the difference between a ~3 s and a
+            # ~4 s reply. CPU has no fp16 win, so it stays fp32.
+            dtype = t.float16 if self.device == "mps" else t.float32
+            self.model = AutoModelForCausalLM.from_pretrained(self.repo, dtype=dtype).to(self.device).eval()
+            self._letters = [self.tok.encode(c, add_special_tokens=False)[0]
+                             for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+            self._loaded = True
+
+    def warm(self) -> None:
+        """Load the model and run one real-shaped forward, so no real message pays for it.
+
+        decider-2b's first load costs 9-15 s and lands inside whichever judge() call gets
+        there first — the HUD starts this in the background right after launch, so that
+        call is ours, not the user's first message. The whole thing runs under the load
+        lock: if a real message arrives mid-warm-up, its judge() blocks here until the
+        warm-up is done, then runs at steady state.
+        """
+        with self._load_lock:
+            self._load()
+            self.judge("预热")
 
     def _slot_probs(self, logits_by_slot: list, n_options: int, slot: int) -> np.ndarray:
         logits = logits_by_slot[slot]

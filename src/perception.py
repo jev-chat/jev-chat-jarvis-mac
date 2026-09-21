@@ -256,6 +256,29 @@ def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True) -> list[Tex
     return _vision_blocks(handler, languages, chat_only)
 
 
+def warm_ocr() -> float:
+    """Pay Vision's one-off recognition-model load on a blank canvas, not a real read.
+
+    The first text recognition in a process costs ~2x steady state (~0.7 s vs ~250 ms)
+    while Vision loads its recognition model. Running that first request on a small white
+    image needs no WeChat window at all — it works even when WeChat starts after this
+    app — so the read loop's first real read finds the framework already paid for.
+    Returns the elapsed milliseconds, or -1.0 when the request itself failed.
+    """
+    cs = Quartz.CGColorSpaceCreateDeviceRGB()
+    ctx = Quartz.CGBitmapContextCreate(
+        None, 64, 64, 8, 64 * 4, cs, Quartz.kCGImageAlphaPremultipliedLast)
+    Quartz.CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 1.0)
+    Quartz.CGContextFillRect(ctx, Quartz.CGRectMake(0, 0, 64, 64))
+    image = Quartz.CGBitmapContextCreateImage(ctx)
+    t0 = time.perf_counter()
+    try:
+        ocr_image(image, chat_only=False)
+    except Exception:
+        return -1.0
+    return (time.perf_counter() - t0) * 1000
+
+
 # ----------------------------------------------------------------- fingerprint
 
 # Fixed grid, independent of window size: a resize re-fingerprints as "different" instead

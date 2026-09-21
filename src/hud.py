@@ -57,7 +57,8 @@ import userconfig  # noqa: E402
 
 userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inherit none)
 
-from perception import read_conversation, screen_capture_ok, request_screen_capture  # noqa: E402
+from perception import (  # noqa: E402
+    read_conversation, screen_capture_ok, request_screen_capture, warm_ocr)
 from judge import make_judge  # noqa: E402
 from generate import Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
@@ -1047,6 +1048,34 @@ class HudController(NSObject):
     def applyPosition_(self, win):
         self._position_near(win)
 
+    # --------------------------------------------------------------- warm-up
+    @objc.python_method
+    def _warm(self):
+        """Pay the one-off loads in the background: Vision OCR first, then the judge model.
+
+        The first real message used to carry both costs: Vision's ~0.7 s first OCR and
+        decider-2b's 9-15 s load inside its first judge(). Starting both here, right after
+        launch, moves them to idle time — the fast one first so it is ready within a
+        second, the slow one after. If a message does land mid-warm-up nothing breaks:
+        its judge() blocks on the model's load lock until the warm-up finishes, and the
+        OCR warm-up is independent of WeChat entirely (a blank canvas, not a window).
+        """
+        t0 = time.perf_counter()
+        ocr_ms = warm_ocr()
+        if ocr_ms >= 0:
+            self._read_once = True    # Vision's one-off load is paid; first read is steady-state
+            _log(f"预热 OCR 就绪 · {ocr_ms:.0f}ms")
+        else:
+            _log("预热 OCR 失败 · 首次读屏会稍慢，不影响使用")
+
+        try:
+            self.judge.warm()
+        except Exception as e:
+            _log(f"预热判断模型失败 {type(e).__name__}: {str(e)[:60]}")
+        else:
+            self._judged_once = True  # same: the load is paid, the first judge is steady-state
+            _log(f"预热 判断模型就绪 · 总耗时 {(time.perf_counter() - t0) * 1000:.0f}ms")
+
 
 def warn_if_no_generation_key() -> None:
     """Say it out loud at launch when the candidate half has no key behind it.
@@ -1098,6 +1127,10 @@ def main() -> None:
          f"{'TypeSafe Jev' if userconfig.get('TYPESAFE_API_KEY') else '本地 decider-2b'}"
          f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}")
     controller._show()
+    # Warm the heavy one-off loads (Vision OCR, judge model) while the panel is idle, so
+    # the user's first message pays only steady-state costs. With TypeSafe Jev configured
+    # warm() is a no-op — the network path has nothing to load.
+    threading.Thread(target=controller._warm, daemon=True).start()
     timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         FAST_TICK, controller, "tick:", None, True)
     AppKit.NSRunLoop.currentRunLoop().addTimer_forMode_(timer, AppKit.NSDefaultRunLoopMode)
