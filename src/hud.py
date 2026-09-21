@@ -189,6 +189,11 @@ class HudController(NSObject):
         self._title_h = 28              # measured right after the panel is built
         self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
         self._last_intent = ""          # kept so a tone change can re-rank without re-judging
+        # streaming candidates: each generation run bumps this epoch at its start and its
+        # streamed lines carry the value, so a late line from a run a tone change or a new
+        # message superseded is dropped instead of written into the new run's rows
+        self._gen_epoch = 0
+        self._stream_rows: dict[int, int] = {}   # slot -> lines already shown, per run
 
         self._busy = False
         self._next_read_ts = 0.0    # reads before this timestamp are skipped (quiet screen)
@@ -643,6 +648,7 @@ class HudController(NSObject):
         # the panel is sized by how many slots are in use, so re-lay-out *before* the new
         # candidates arrive: the empty rows appear at once and nothing jumps later
         self._clear_candidates()
+        self._stream_rows = {}     # the run _regenerate starts streams into fresh rows
         self._regenerate()
 
     @objc.python_method
@@ -696,10 +702,34 @@ class HudController(NSObject):
         return payload, ""
 
     @objc.python_method
+    def _stream_hook(self, t0: float, label: str = ""):
+        """The on_candidate callback for the generation run starting now.
+
+        Shared by all three run starters (_analyze, _run_generation, _regen_work) so the
+        streaming lines follow one epoch/rows discipline no matter which path produced
+        them. The callback runs on the run's worker thread; it hops to the main thread for
+        every UI touch, and the first line it sees logs the latency that streaming is here
+        for. The epoch check inside applyStreamLine_ is what makes a superseded run's late
+        lines harmless.
+        """
+        self._gen_epoch += 1
+        epoch = self._gen_epoch
+        prefix = f"{label} " if label else ""
+        first_line = {"shown": False}
+
+        def on_candidate(slot: int, _tone: str, text: str) -> None:
+            if not first_line["shown"]:
+                first_line["shown"] = True
+                _log(f"{prefix}首条候选上屏 {(time.perf_counter() - t0) * 1000:.0f}ms（未排序）")
+            self._push("applyStreamLine:", (epoch, slot, text))
+        return on_candidate
+
+    @objc.python_method
     def _regen_work(self, text: str, intent: str, slot_tones: list[str]):
         t0 = time.perf_counter()
         try:
-            gen = self.generator.generate(text, intent, slot_tones)
+            gen = self.generator.generate(text, intent, slot_tones, None,
+                                          self._stream_hook(t0, "换话术"))
             groups = gen.get("groups") or []
             failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
             _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
@@ -984,7 +1014,8 @@ class HudController(NSObject):
         t0 = time.perf_counter()
         try:
             context = self._context_text(msgs, newest)
-            gen = self.generator.generate(newest.text, "", list(self.slot_tones), context)
+            gen = self.generator.generate(newest.text, "", list(self.slot_tones),
+                                          context, self._stream_hook(t0))
             self._finish_generate(gen, newest, t0, verdict)
         except Exception as e:
             _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
@@ -1026,7 +1057,7 @@ class HudController(NSObject):
             # generation does not need the intent, so it runs while judging; it does need the
             # chosen 话术, which is read here (a plain list read) and passed in
             gen_future = ex.submit(self.generator.generate, newest.text, "",
-                                   list(self.slot_tones), context)
+                                   list(self.slot_tones), context, self._stream_hook(t0))
             verdict = None
             t_judge = time.perf_counter()
             try:
@@ -1105,6 +1136,7 @@ class HudController(NSObject):
         self._render("message", text, PALETTE["text"])    # inked: this is the one
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
         self._clear_candidates()
+        self._stream_rows = {}     # a new run starts at line zero in every slot
         self.rows["cand_header"].setStringValue_("候选回复 · 等待判断…")
 
     def applyJudgment_(self, payload):
@@ -1144,6 +1176,30 @@ class HudController(NSObject):
     def applyCandidates_(self, payload):
         self.rows["cand_header"].setStringValue_("候选回复（按合适度排序）")
         self._render_groups(payload)
+
+    def applyStreamLine_(self, payload):
+        """One streamed candidate line, shown the moment it completes (not ranked yet).
+
+        applyCandidates_ re-fills every row with scores when the full result lands, so the
+        "#n" here is only "nth line of this tone" and the score slot reads as pending. A
+        superseded run's lines are dropped by the epoch check — a tone change or a new
+        message starting mid-stream must not write into the new run's rows.
+        """
+        epoch, slot, text = payload
+        if epoch != self._gen_epoch or not self._slot_active(slot):
+            return
+        row = self._stream_rows.get(slot, 0)
+        if row >= styles.PER_TONE:
+            return                       # the prompt asks for PER_TONE lines; extras stray
+        self._stream_rows[slot] = row + 1
+        self.cand_texts[slot * styles.PER_TONE + row] = text
+        if self._collapsed:
+            return      # collapse keeps the data; _set_collapsed(False) puts it back up
+        r = self._rows[slot][row]
+        r["prob"].setStringValue_(f"#{row + 1}")
+        r["text"].setStringValue_(text)
+        for c in self._row_controls(slot, row):
+            c.setHidden_(False)
 
     def applyError_(self, text):
         self._show()                       # never vanish without telling the user why
