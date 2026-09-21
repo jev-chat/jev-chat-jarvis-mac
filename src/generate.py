@@ -42,6 +42,24 @@ DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com"
 MISSING_HINT = ("未配置生成层 Key：候选回复需要它，判断/风险不需要。"
                 "设置 OPENAI_API_KEY（或 ANTHROPIC_API_KEY）后重启，见 README 配置章节。")
 
+
+class ThinkingOnlyError(Exception):
+    """A reasoning model spent the whole max_tokens budget thinking and wrote no text.
+
+    DeepSeek-style reasoning models return the chain of thought alongside the answer; with
+    this app's small per-request budget (300 tokens) the thinking can consume everything
+    and `content` arrives empty. That is a wrong-model problem, not a network one, so the
+    error names the model and the fix — the panel would otherwise fold it into 「空结果」,
+    which reads as "generation is broken" instead of "the model is misconfigured".
+    """
+
+
+# The message carried by ThinkingOnlyError. Fits the panel's err[:60] display budget for
+# realistic model names (fixed part is 41 chars), so the suggestion survives truncation.
+# {alt} is a non-thinking model the configured endpoint actually serves (see _call).
+THINKING_ONLY_HINT = ("思考型 {model}：额度被思考耗尽，正文 0 条；"
+                      "换非思考模型（如 {alt}）")
+
 # One request per tone. {n} appears twice on purpose: the "exactly n lines" demand has to
 # agree with the count asked for, or the model pads the answer with a line of its own.
 #
@@ -185,6 +203,10 @@ class Generator:
             model = self.model_override
         if self.api_override:
             api = self.api_override
+        # the "switch to this" example should be a model the configured endpoint actually
+        # serves: deepseek-chat on OpenAI-shaped providers, this app's non-thinking default
+        # (DEFAULT_MODEL) behind the Anthropic shape
+        alt = "glm-4-flash" if api == "anthropic" else "deepseek-chat"
         if api == "anthropic":
             url = _endpoint(base, "anthropic")
             body = {"model": model, "max_tokens": 300, "temperature": 0.9,
@@ -193,7 +215,15 @@ class Generator:
                        "anthropic-version": "2023-06-01"}
             data = self._post(url, headers, body)
             parts = data.get("content") or []
-            return "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+            raw = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+            if not raw.strip():
+                # extended thinking returns its blocks next to the text blocks; text
+                # missing while thinking is present means the budget died mid-thought
+                thinking = "".join(p.get("thinking", "") for p in parts
+                                   if isinstance(p, dict))
+                if thinking.strip():
+                    raise ThinkingOnlyError(THINKING_ONLY_HINT.format(model=model, alt=alt))
+            return raw
 
         url = _endpoint(base, "openai")
         body = {"model": model, "max_tokens": 300, "temperature": 0.9,
@@ -203,7 +233,16 @@ class Generator:
         choices = data.get("choices") or []
         if not choices:
             return ""
-        return (choices[0].get("message") or {}).get("content") or ""
+        msg = choices[0].get("message") or {}
+        content = msg.get("content") or ""
+        if not content.strip():
+            # reasoning lives in reasoning_content (DeepSeek, SiliconFlow) or reasoning
+            # (OpenRouter); a string there with empty content is the same wrong-model case
+            for field in ("reasoning_content", "reasoning"):
+                v = msg.get(field)
+                if isinstance(v, str) and v.strip():
+                    raise ThinkingOnlyError(THINKING_ONLY_HINT.format(model=model, alt=alt))
+        return content
 
     def _post(self, url: str, headers: dict, body: dict) -> dict:
         self._last_url = url
@@ -239,6 +278,8 @@ class Generator:
                                    instruction=styles.PRESETS[tone])
         try:
             raw = self._call(prompt)
+        except ThinkingOnlyError as e:
+            return [], str(e)            # already panel-ready: model named, fix suggested
         except urllib.error.HTTPError as e:
             detail = e.read()[:160].decode(errors="replace")
             return [], f"HTTP {e.code} @ {self._last_url} — {detail}"
@@ -279,7 +320,18 @@ class Generator:
                 groups.append({"slot": i, "tone": tone, "texts": texts, "error": err})
 
         _base, _key, model = self._creds_or_load()
-        return {"groups": groups, "model": model,
+        # when nothing came back from any tone, the per-group reasons are the only
+        # diagnosis there is — lift them to the top level so the panel shows e.g.
+        # "思考型 deepseek-v4-pro：…" instead of hud's generic 「空结果」 fallback
+        error = ""
+        if not any(g["texts"] for g in groups):
+            seen: list[str] = []
+            for g in groups:
+                e = (g.get("error") or "").strip()
+                if e and e not in seen:      # same wrong model -> same hint N times
+                    seen.append(e)
+            error = " · ".join(seen)
+        return {"groups": groups, "model": model, "error": error,
                 "elapsed_s": time.perf_counter() - t0}
 
 
