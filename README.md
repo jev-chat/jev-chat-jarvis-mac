@@ -32,7 +32,17 @@
 
 ## 用法
 
-**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases) 下载 `.app`，解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
+**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases/latest/download/jev-chat-jarvis-macos.zip) 下载 `.app`，解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
+
+![「已损坏，无法打开」的报错弹窗](docs/troubleshoot-damaged.png)
+
+弹窗若显示「**已损坏，无法打开，你应该将它移到废纸篓**」（浏览器下载的 zip 常见，右键打开也绕不过），别删——在终端清掉隔离属性即可：
+
+```bash
+sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
+```
+
+`.app` 若改过名（如「jev-jarvis 2.app」），把命令里的目录名换成实际路径。
 
 首次启动按提示授予「屏幕录制」权限（系统设置 › 隐私与安全性 › 录屏与系统录音，给 **jev-jarvis** 打开），**退出重开**生效；「填入」另需「辅助功能」权限，第一次点会弹系统授权框。v0.3.1 及更早的旧版本还需把 **python3.12** 那条一并打开。
 
