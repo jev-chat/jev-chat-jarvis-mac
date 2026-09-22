@@ -90,6 +90,7 @@ chmod 600 ~/.config/jev-jarvis/env
 
 ## 已知限制
 
+- 悬浮窗只在微信位于前台时显示和分析；切到浏览器等其他应用会立即隐藏并丢弃未完成的旧结果，返回微信后强制重新读取当前聊天，避免把旧面板误认为正在识别其他应用
 - 收发方向靠文字位置判断：横跨左右或居中、无法确认方向的文本标「方向未确认」，**不作为回复目标**（很宽的对方消息可能被跳过）；只有明确识别为「对方」的消息才触发判断与生成，只有自己消息时面板显示「等待可确认的对方消息…」
 - 图片/表情包读不出内容；引用回复当普通文本；公众号卡片可能被当消息解读；微信全屏布局下识别可能失效（布局常量待动态化，见 #17）
 - 微信改版会让布局常量失效（`src/perception.py` 顶部常量需重新校准）；多窗口优先识别主窗口「微信 / WeChat」
@@ -113,7 +114,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - **贡献前必读**：[CONTRIBUTING.md](CONTRIBUTING.md)——动代码前先在 issue 认领（评论 + assignee），分层自测改哪层跑哪层
 - 配置界面自测：`uv run python -B -m unittest discover -s tests`；macOS 原生窗口与按钮流程：`uv run python -B probe/settings_smoke.py`（临时配置 + 本地测试服务，不使用个人密钥）。
 - 打包 `./packaging/build_app.sh`；发版 `./packaging/release.sh --publish`（干净 worktree 构建 + 解压回验 + gh release）。版本号只有 `pyproject.toml` 一处；有开发者证书可加 `--sign "Developer ID Application: ..."`
-- 架构一句话：进程内抓微信窗口 → Vision OCR（只扫聊天区）→ 本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。抓窗口不抓屏：微信被挡住也能抓，悬浮窗不污染 OCR
+- 架构一句话：微信在前台时，进程内抓其窗口 → Vision OCR（只扫聊天区）→ 本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。底层仍按窗口 ID 抓取而不是全屏截图，悬浮窗不污染 OCR
 
 ## 许可与免责
 

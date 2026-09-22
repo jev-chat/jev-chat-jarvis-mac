@@ -106,9 +106,32 @@ def request_screen_capture() -> bool:
         return False
 
 
+def frontmost_app_is_wechat() -> bool | None:
+    """Whether the app currently receiving user input is WeChat.
+
+    The window-ID capture path can read an obscured WeChat window, which is useful for
+    OCR but not a safe display boundary: a global floating HUD left above Chrome looks
+    as if browser text were analysed. Keep foreground ownership separate from window
+    discovery so returning to WeChat can force a fresh capture instead of reusing cache.
+    """
+    try:
+        import AppKit
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return None
+        bundle = app.bundleIdentifier() or ""
+        name = app.localizedName() or ""
+        return bundle == "com.tencent.xinWeChat" or name in ("微信", "WeChat", "Weixin")
+    except Exception:
+        return None
+
+
 def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     """Prefer the main chat window over larger detached WeChat windows."""
-    main_titles = ("微信", "WeChat")
+    # Current mainland builds report the main window/app as ``Weixin`` on some
+    # macOS locales.  Without that alias a larger detached web/mini-program
+    # window wins the area tiebreak and its old pixels are OCR'd as the chat.
+    main_titles = ("微信", "WeChat", "Weixin")
     opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
     wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     best: WindowInfo | None = None

@@ -67,7 +67,8 @@ import userconfig  # noqa: E402
 userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inherit none)
 
 from perception import (  # noqa: E402
-    read_conversation, screen_capture_ok, request_screen_capture, warm_ocr)
+    frontmost_app_is_wechat, read_conversation, screen_capture_ok,
+    request_screen_capture, warm_ocr)
 from judge import make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
@@ -85,6 +86,7 @@ FAST_TICK = 0.25         # re-check cadence while the chat pane is quiet
 BURST_TICK = 0.45        # short cadence right after a change: catch the burst's next message
 BURST_READS = 3          # how many reads stay on BURST_TICK before falling back to SLOW_TICK
 SLOW_TICK = 1.0          # re-check cadence while the chat pane keeps moving
+READ_FAILURE_HIDE_S = 2.0  # do not flicker on a transient capture/window miss
 SETTLE_S = 1.2           # upper bound on the settle wait (anti-flood; unchanged by design)
 EARLY_SETTLE_S = 0.70    # the gate may open this early …
 STABLE_READS = 3         # … but only after this many consecutive unchanged reads
@@ -279,6 +281,10 @@ class HudController(NSObject):
         self._chat_title = ""
         self._asked_permission = False
         self._win_wid = None          # sticky WeChat window id
+        self._wechat_frontmost = None # foreground boundary; False means capture state is stale
+        self._foreground_epoch = 0    # catches leave+return while one capture is in flight
+        self._read_fail_since = None  # debounce transient foreground capture failures
+        self._read_fail_hidden = False
         self._last_origin = None      # last applied panel origin
         self._pending_origin = None   # candidate origin awaiting confirmation
         self._build_panel()
@@ -986,7 +992,51 @@ class HudController(NSObject):
         self._last_origin = None      # let the next tick re-dock cleanly
 
     # --------------------------------------------------------------- loop
+    @objc.python_method
+    def _set_foreground_state(self, frontmost):
+        """Apply one hard lifecycle boundary when WeChat gains/loses focus."""
+        if frontmost is None or frontmost is self._wechat_frontmost:
+            return False
+
+        self._wechat_frontmost = frontmost
+        self._foreground_epoch += 1
+        self._reply_epoch += 1
+        self._reply_key = None
+        self.last_seen = None
+        self.analyzed_text = None
+        self._prejudge_req = self._prejudge_result = None
+        self._pregen_req = self._pregen_result = None
+        self._gen_epoch += 1
+        self._fingerprint = None
+        self._last_full = None
+        self._win_wid = None
+        self._input_target = None
+        self._input_window = None
+        self._input_next = 0
+        self._stable_n = 0
+        self._burst_left = BURST_READS
+        self._last_skip_reason = None
+        self._read_fail_since = None
+        self._read_fail_hidden = False
+
+        if frontmost:
+            self._next_read_ts = 0
+            _log("前台切换 · 微信回到前台，强制重新读屏")
+        else:
+            _log("前台切换 · 微信离开前台，隐藏面板并清空旧结果")
+            self._push("applyForegroundHidden:", "微信不在前台")
+        return True
+
     def tick_(self, timer):
+        # Check activation before pause/busy/read-cadence gates.  The timer keeps
+        # firing while OCR is in flight, so a quick WeChat -> Chrome -> WeChat
+        # round trip still advances _foreground_epoch and retires that capture.
+        frontmost_is_wechat = frontmost_app_is_wechat()
+        if frontmost_is_wechat is None:
+            return
+        self._set_foreground_state(frontmost_is_wechat)
+        if not frontmost_is_wechat:
+            return
         if self._paused or self._busy or time.time() < self._next_read_ts:
             return  # paused, a previous read is still running, or not due yet
         self._busy = True
@@ -1001,6 +1051,21 @@ class HudController(NSObject):
 
     @objc.python_method
     def _work_inner(self):
+        # The panel is a global floating window. Showing it over Chrome while continuing
+        # to reuse the last WeChat frame makes stale text look like browser OCR. Treat app
+        # activation as a hard display/capture boundary before even checking permissions:
+        # a missing screen grant must not keep an error panel floating over other apps.
+        frontmost_is_wechat = frontmost_app_is_wechat()
+        if frontmost_is_wechat is None:
+            # A transient NSWorkspace failure is not proof that the user left WeChat.
+            # Freeze both reads and UI updates for one short tick without cancelling a
+            # valid in-flight reply or manufacturing a leave/return transition.
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+        self._set_foreground_state(frontmost_is_wechat)
+        if not frontmost_is_wechat:
+            self._next_read_ts = time.time() + FAST_TICK
+            return
         if not screen_capture_ok():
             if not self._asked_permission:
                 self._asked_permission = True
@@ -1008,6 +1073,7 @@ class HudController(NSObject):
             self._push("applyError:", "需要屏幕录制权限 · 系统设置 › 隐私与安全性")
             self._next_read_ts = time.time() + SLOW_TICK
             return
+        capture_foreground_epoch = self._foreground_epoch
         try:
             res = read_conversation(previous_wid=self._win_wid,
                                     prev_fingerprint=self._fingerprint)
@@ -1015,13 +1081,47 @@ class HudController(NSObject):
             self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
             self._next_read_ts = time.time() + SLOW_TICK
             return
-        if not res["ok"]:
-            # WeChat gone or unreadable: the panel and the YOLO overlay go with it
-            # (applyHidden_ existed for exactly this but was never wired — the panel used
-            # to stay on screen with an error, and stale overlay boxes floated forever)
-            self._push("applyHidden:", res["error"])
-            self._next_read_ts = time.time() + SLOW_TICK
+        # Re-check after the blocking capture/OCR.  tick_ may have observed a
+        # complete leave+return while this worker was busy; in that case even a
+        # currently-frontmost WeChat does not make this old snapshot current.
+        frontmost_is_wechat = frontmost_app_is_wechat()
+        if frontmost_is_wechat is None:
+            self._next_read_ts = time.time() + FAST_TICK
             return
+        self._set_foreground_state(frontmost_is_wechat)
+        if (not frontmost_is_wechat
+                or capture_foreground_epoch != self._foreground_epoch):
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+        if not res["ok"]:
+            # Window enumeration/capture can miss one frame while WeChat redraws.
+            # Keep the already-current HUD stable for a short grace period, then
+            # hide and force rediscovery if the failure really persists.
+            now_mono = time.monotonic()
+            if self._read_fail_since is None:
+                self._read_fail_since = now_mono
+            if (not self._read_fail_hidden
+                    and now_mono - self._read_fail_since >= READ_FAILURE_HIDE_S):
+                self._read_fail_hidden = True
+                # A persistent miss is no longer a harmless one-frame redraw.
+                # Retire every reply callback before hiding; otherwise an in-flight
+                # generation from the last visible frame could call _show() again.
+                self._reply_epoch += 1
+                self._reply_key = None
+                self.last_seen = None
+                self.analyzed_text = None
+                self._prejudge_req = self._prejudge_result = None
+                self._pregen_req = self._pregen_result = None
+                self._gen_epoch += 1
+                self._fingerprint = None
+                self._last_full = None
+                self._win_wid = None
+                self._push("applyForegroundHidden:", res["error"])
+            self._next_read_ts = time.time() + FAST_TICK
+            return
+
+        self._read_fail_since = None
+        self._read_fail_hidden = False
 
         # Same fingerprint ⇒ same pixels ⇒ the messages are exactly what we last read.
         # Cadence follows the screen: quiet checks back in FAST_TICK (capture+hash only,
@@ -1470,7 +1570,8 @@ class HudController(NSObject):
 
     @objc.python_method
     def _reply_current(self):
-        return (self._reply_key is not None and not self._paused
+        return (self._wechat_frontmost is True
+                and self._reply_key is not None and not self._paused
                 and getattr(self._reply_worker, "epoch", self._reply_epoch) == self._reply_epoch)
 
     @objc.python_method
@@ -1480,7 +1581,7 @@ class HudController(NSObject):
 
     def applyReplyUpdate_(self, update):
         epoch, selector, payload = update
-        if epoch != self._reply_epoch:
+        if self._wechat_frontmost is not True or epoch != self._reply_epoch:
             return
         if selector not in {"applyWaiting:", "applyError:"} and not self._reply_current():
             return
@@ -1603,13 +1704,27 @@ class HudController(NSObject):
         if self._ov_panel.isVisible():
             self._ov_panel.orderOut_(None)
 
+    def applyForegroundHidden_(self, reason):
+        """Hide a global panel without leaving stale conversation state behind."""
+        self._last_intent = ""
+        self._last_risk = 0.0
+        self._stream_rows = {}
+        self._chat_title = ""
+        self._clear_candidates()
+        for key in ("chat", "message", "sender", "intent", "confidence", "risk", "actions"):
+            self._render(key, "", PALETTE["muted"])
+        self.rows["cand_header"].setStringValue_("候选回复")
+        self.applyHidden_(reason)
+
     def applyPosition_(self, win):
+        if self._wechat_frontmost is not True:
+            return
         self._position_near(win)
 
     # --- YOLO overlay callbacks (visual only; see _build_overlay)
     def applyBoxes_(self, payload):
         """Repaint the overlay from the last read's window geometry + messages."""
-        if not self._show_boxes:
+        if self._wechat_frontmost is not True or not self._show_boxes:
             return
         win, msgs, newest_text = payload
         W, H = win["w"], win["h"]

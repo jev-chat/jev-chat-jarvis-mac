@@ -14,13 +14,13 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from perception import TextBlock, extract_messages
+from perception import TextBlock, extract_messages, find_wechat_window
 
 
 def hud_harness():
     tree = ast.parse((ROOT / 'src/hud.py').read_text())
     source = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'HudController')
-    names = {'_work_inner', '_push', '_reply_task', '_reply_current', '_push_reply',
+    names = {'_work_inner', '_set_foreground_state', '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
              '_prejudge_loop', '_pregen_loop'}
@@ -29,9 +29,12 @@ def hud_harness():
         method.decorator_list = []
     klass = ast.ClassDef(name='Harness', bases=[], keywords=[], body=methods, decorator_list=[])
     scope = {'fill': SimpleNamespace(locate_input=Mock(return_value={'box': None, 'rect': None, 'reason': 'test'})), 'time': time, 'threading': threading, '_log': lambda *_: None,
-             'screen_capture_ok': lambda: True, 'read_conversation': Mock(),
+             'frontmost_app_is_wechat': Mock(return_value=True),
+             'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
+             'read_conversation': Mock(),
              'PALETTE': {'muted': None}, 'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
              'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
+             'READ_FAILURE_HIDE_S': 2,
              'SETTLE_S': 1.2, 'STABLE_READS': 3, 'EARLY_SETTLE_S': .7, 'MIN_GAP_S': 2}
     module = ast.fix_missing_locations(ast.Module(body=[klass], type_ignores=[]))
     exec(compile(module, str(ROOT / 'src/hud.py'), 'exec'), scope)
@@ -48,6 +51,13 @@ def block(text, x, y, w, h=.035):
 class OutgoingTests(unittest.TestCase):
     def setUp(self):
         self.h = h = Harness()
+        HUD['read_conversation'].reset_mock()
+        HUD['read_conversation'].side_effect = None
+        HUD['frontmost_app_is_wechat'].reset_mock()
+        HUD['frontmost_app_is_wechat'].side_effect = None
+        HUD['frontmost_app_is_wechat'].return_value = True
+        HUD['screen_capture_ok'].reset_mock()
+        HUD['screen_capture_ok'].return_value = True
         for name, value in dict(
             _reply_key=None, _reply_epoch=0, _reply_worker=threading.local(),
             last_seen=None, analyzed_text=None, _win_wid=None, _fingerprint=None,
@@ -56,6 +66,8 @@ class OutgoingTests(unittest.TestCase):
             _pregen_req=None, _pregen_result=None, _pregen_running=False,
             _prejudging=False, _paused=False, _analyzing=False,
             _stable_n=0, last_change_ts=0, last_analyze_ts=0,
+            _wechat_frontmost=None, _foreground_epoch=0,
+            _read_fail_since=None, _read_fail_hidden=False,
             _prejudge_event=threading.Event(), _pregen_event=threading.Event(),
             slot_tones=['normal'], _stream_rows={}, _last_context=None,
         ).items():
@@ -72,7 +84,8 @@ class OutgoingTests(unittest.TestCase):
         h._judged_once = True
         for name in ['applyIncoming_', 'applyPending_', 'applyJudgment_',
                      'applyCandidates_', 'applyStreamLine_', 'applyError_',
-                     'applyPosition_', 'applyChat_', 'applyBoxes_']:
+                     'applyPosition_', 'applyChat_', 'applyBoxes_', 'applyHidden_',
+                     'applyForegroundHidden_']:
             setattr(h, name, Mock())
         self.queue = []
         h.performSelectorOnMainThread_withObject_waitUntilDone_ = lambda s, p, w: self.queue.append((s, p))
@@ -236,6 +249,159 @@ class OutgoingTests(unittest.TestCase):
         with self.assertRaises(Finished):
             self.h._pregen_loop()
         self.assertIsNone(self.h._pregen_result)
+
+    def test_background_app_hides_without_reading_and_invalidates_reply(self):
+        self.incoming()
+        old_epoch = self.h._reply_epoch
+        HUD['read_conversation'].reset_mock()
+        HUD['frontmost_app_is_wechat'].return_value = False
+        HUD['screen_capture_ok'].return_value = False
+
+        self.h._work_inner()
+        self.flush()
+
+        HUD['read_conversation'].assert_not_called()
+        self.h.applyError_.assert_not_called()
+        self.h.applyForegroundHidden_.assert_called_once()
+        self.assertGreater(self.h._reply_epoch, old_epoch)
+        self.assertIsNone(self.h._reply_key)
+        self.assertIsNone(self.h._last_full)
+        self.assertIsNone(self.h._fingerprint)
+
+    def test_return_to_wechat_forces_fresh_window_read(self):
+        self.h._wechat_frontmost = False
+        self.h._win_wid = 7
+        self.h._fingerprint = b'old-frame'
+        self.h._last_full = {'messages': ['stale']}
+        HUD['frontmost_app_is_wechat'].return_value = True
+        HUD['read_conversation'].return_value = {
+            'ok': True, 'unchanged': False, 'fingerprint': b'new-frame',
+            'window': {'wid': 9}, 'chat_title': 'current', 'messages': [],
+        }
+
+        self.h._work_inner()
+
+        HUD['read_conversation'].assert_called_once_with(
+            previous_wid=None, prev_fingerprint=None)
+        self.assertEqual(self.h._win_wid, 9)
+
+    def test_unknown_foreground_state_does_not_fake_an_app_switch(self):
+        self.incoming()
+        old_epoch = self.h._reply_epoch
+        old_key = self.h._reply_key
+        old_full = self.h._last_full
+        HUD['read_conversation'].reset_mock()
+        HUD['frontmost_app_is_wechat'].return_value = None
+
+        self.h._work_inner()
+        self.flush()
+
+        HUD['read_conversation'].assert_not_called()
+        self.h.applyHidden_.assert_not_called()
+        self.assertEqual(self.h._reply_epoch, old_epoch)
+        self.assertEqual(self.h._reply_key, old_key)
+        self.assertIs(self.h._last_full, old_full)
+
+    def test_return_with_multiple_wechat_windows_rediscovers_main(self):
+        self.h._wechat_frontmost = False
+        self.h._win_wid = 7
+        self.h._fingerprint = b'old-frame'
+        HUD['frontmost_app_is_wechat'].return_value = True
+        detached = {
+            'kCGWindowOwnerName': 'WeChat', 'kCGWindowNumber': 2,
+            'kCGWindowName': '微信 (窗口)', 'kCGWindowOwnerPID': 1,
+            'kCGWindowBounds': {'Width': 947, 'Height': 679},
+        }
+        main = {
+            'kCGWindowOwnerName': 'WeChat', 'kCGWindowNumber': 1,
+            'kCGWindowName': 'Weixin', 'kCGWindowOwnerPID': 1,
+            'kCGWindowBounds': {'Width': 754, 'Height': 593},
+        }
+
+        def fresh_read(previous_wid, prev_fingerprint):
+            self.assertIsNone(previous_wid)
+            self.assertIsNone(prev_fingerprint)
+            with patch('Quartz.CGWindowListCopyWindowInfo', return_value=[detached, main]):
+                selected = find_wechat_window(previous_wid)
+            return {
+                'ok': True, 'unchanged': False, 'fingerprint': b'new-frame',
+                'window': {'wid': selected.wid}, 'chat_title': 'current', 'messages': [],
+            }
+
+        HUD['read_conversation'].side_effect = fresh_read
+        self.h._work_inner()
+
+        self.assertEqual(self.h._win_wid, 1)
+
+    def test_switch_during_capture_discards_snapshot(self):
+        states = iter([True, False])
+        HUD['frontmost_app_is_wechat'].side_effect = lambda: next(states)
+        HUD['read_conversation'].return_value = {
+            'ok': True, 'unchanged': False, 'fingerprint': b'stale',
+            'window': {'wid': 7}, 'chat_title': 'stale', 'messages': [],
+        }
+
+        self.h._work_inner()
+        self.flush()
+
+        self.h.applyForegroundHidden_.assert_called_once()
+        self.h.applyIncoming_.assert_not_called()
+        self.h._show.assert_not_called()
+        self.h.applyPosition_.assert_not_called()
+        self.assertIsNone(self.h._fingerprint)
+        self.assertIsNone(self.h._last_full)
+
+    def test_leave_and_return_during_capture_discards_old_snapshot(self):
+        HUD['frontmost_app_is_wechat'].return_value = True
+
+        def read_then_round_trip(**_kwargs):
+            self.h._set_foreground_state(False)
+            self.h._set_foreground_state(True)
+            return {
+                'ok': True, 'unchanged': False, 'fingerprint': b'stale',
+                'window': {'wid': 7}, 'chat_title': 'stale', 'messages': [],
+            }
+
+        HUD['read_conversation'].side_effect = read_then_round_trip
+        self.h._work_inner()
+        self.flush()
+
+        self.h.applyForegroundHidden_.assert_called_once()
+        self.h._show.assert_not_called()
+        self.assertIsNone(self.h._fingerprint)
+        self.assertIsNone(self.h._last_full)
+
+    def test_transient_read_failure_does_not_hide_hud(self):
+        HUD['read_conversation'].return_value = {'ok': False, 'error': 'transient'}
+
+        self.h._work_inner()
+        self.flush()
+
+        self.h.applyHidden_.assert_not_called()
+        self.assertIsNotNone(self.h._read_fail_since)
+
+    def test_sustained_read_failure_hides_and_forces_rediscovery(self):
+        self.h._wechat_frontmost = True
+        self.h._foreground_epoch = 1
+        self.h._win_wid = 7
+        self.h._fingerprint = b'old'
+        self.h._last_full = {'messages': ['old']}
+        self.h._read_fail_since = time.monotonic() - 3
+        old_epoch = self.h._reply_epoch
+        self.h._reply_key = ('chat', 'old')
+        HUD['read_conversation'].return_value = {'ok': False, 'error': 'gone'}
+
+        self.h._work_inner()
+        self.flush()
+
+        self.h.applyForegroundHidden_.assert_called_once_with('gone')
+        self.assertGreater(self.h._reply_epoch, old_epoch)
+        self.assertIsNone(self.h._reply_key)
+        self.assertIsNone(self.h._win_wid)
+        self.assertIsNone(self.h._fingerprint)
+        self.assertIsNone(self.h._last_full)
+        self.h.applyReplyUpdate_((old_epoch, 'applyError:', 'late result'))
+        self.h.applyError_.assert_not_called()
 
 
 if __name__ == '__main__':
