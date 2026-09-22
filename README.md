@@ -25,6 +25,8 @@
 
 首次启动按提示授予「屏幕录制」权限（系统设置 › 隐私与安全性 › 录屏与系统录音，给 **jev-jarvis** 打开），**退出重开**生效；「填入」另需「辅助功能」权限，第一次点会弹系统授权框。v0.3.1 及更早的旧版本还需把 **python3.12** 那条一并打开。
 
+缺少可用的 uv 时，两种启动入口都先完整下载并执行官方安装脚本（下载含超时和重试），失败后尝试已有的 Homebrew。失败提示区分网络、证书、磁盘和安装器错误，详细输出见 `~/Library/Logs/jev-jarvis.log`。官方脚本安装到 `~/.local/bin`，不修改 shell 配置。
+
 **从源码跑**（微信在运行、终端已授予屏幕录制）：`./start.command`。分层自测：
 
 ```bash
@@ -33,6 +35,7 @@ uv run python src/judge.py "这个需求你今天跟一下"  # 单条消息出�
 uv run python src/judge_zh_test.py               # 22 条中文意图回归
 uv run python src/generate.py --check            # 生成层凭据解析
 uv run python -B -m unittest discover -s tests   # 发出消息/异步结果回归（合成 OCR，不读屏）
+python3 probe/bootstrap_regression.py            # 两种启动入口的离线回归；不联网、不实际安装
 ```
 
 ## 配置

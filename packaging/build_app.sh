@@ -40,6 +40,8 @@ echo "==> 拷贝 Python 源码（版本 $VERSION / Python $PY_PIN）"
 cd "$ROOT"
 cp -R src "$APP/Contents/Resources/app/src"
 cp pyproject.toml uv.lock README.md .python-version "$APP/Contents/Resources/app/"
+mkdir -p "$APP/Contents/Resources/app/packaging"
+cp packaging/bootstrap_uv.sh "$APP/Contents/Resources/app/packaging/"
 # MIT requires the copyright notice to travel with a distributed copy
 if [ -f LICENSE ]; then cp LICENSE "$APP/Contents/Resources/app/"; fi
 if [ -f .env.example ]; then cp .env.example "$APP/Contents/Resources/app/"; fi
@@ -95,7 +97,7 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # so sourcing here is the only chance to pick the keys up before Python also reads them.
 [ -f "$CONFIG/env" ] && source "$CONFIG/env"
 
-log() { print -r -- "[$(date '+%F %T')] $*" >> "$LOG" }
+log() { print -r -- "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 die() {  # show a native dialog, then exit
     log "FATAL: $1"
@@ -103,16 +105,14 @@ die() {  # show a native dialog, then exit
     exit 1
 }
 
+source "$RES/app/packaging/bootstrap_uv.sh" || die "包内缺少 uv 安装脚本，请重新下载应用"
 if ! command -v uv >/dev/null 2>&1; then
-    log "未找到 uv，正在用官方脚本安装"
     # non-blocking: a Finder launch has no terminal, and a silent multi-minute wait
     # for uv + deps is indistinguishable from "the app is broken"
     osascript -e 'display notification "首次启动：正在安装 uv（约 10 MB）" with title "jev-chat-jarvis"' >/dev/null 2>&1
-    curl -LsSf https://astral.sh/uv/install.sh >>"$LOG" 2>&1
 fi
-# re-check rather than trust the installer: PATH above already covers ~/.local/bin
-if ! command -v uv >/dev/null 2>&1; then
-    die "未找到 uv，自动安装失败。请手动安装：brew install uv（或 curl -LsSf https://astral.sh/uv/install.sh | sh）"
+if ! jev_ensure_uv "$LOG"; then
+    die "$JEV_UV_ERROR。也可手动运行 brew install uv 后重试。"
 fi
 
 export UV_PROJECT_ENVIRONMENT="$VENV"
@@ -194,6 +194,7 @@ check "启动器是原生 Mach-O"         "file '$APP/Contents/MacOS/jev-jarvis'
 check "bootstrap 可执行"            "[ -x '$APP/Contents/Resources/launcher.zsh' ]"
 check "源码进包（hud.py）"          "[ -f '$APP/Contents/Resources/app/src/hud.py' ]"
 check "锁文件进包（uv.lock）"        "[ -f '$APP/Contents/Resources/app/uv.lock' ]"
+check "uv 安装脚本进包"             "[ -f '$APP/Contents/Resources/app/packaging/bootstrap_uv.sh' ]"
 check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.python-version' ]"
 check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
 check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/Resources/launcher.zsh'"
