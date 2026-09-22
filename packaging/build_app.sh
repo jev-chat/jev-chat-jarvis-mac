@@ -81,6 +81,7 @@ cat > "$APP/Contents/Resources/launcher.zsh" <<'LAUNCHER'
 #!/bin/zsh
 # Bootstrap: prepare the uv environment, then run the app under the native launcher.
 set -u
+export PYTHONDONTWRITEBYTECODE=1  # keep the signed app bundle immutable at runtime
 
 RES="$(cd "$(dirname "$0")" && pwd)"
 SUPPORT="$HOME/Library/Application Support/jev-jarvis"
@@ -198,6 +199,7 @@ check "uv 安装脚本进包"             "[ -f '$APP/Contents/Resources/app/pac
 check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.python-version' ]"
 check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
 check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/Resources/launcher.zsh'"
+check "运行时不会改写已签名包"       "grep -q '^export PYTHONDONTWRITEBYTECODE=1' '$APP/Contents/Resources/launcher.zsh'"
 check "没夹带缓存"                  "[ ! -d '$APP/Contents/Resources/app/src/__pycache__' ]"
 # a key that leaked into src/ would ship to whoever gets the bundle. src/builtin.py is the
 # single deliberate exception — it holds the shared default that lets an unconfigured install

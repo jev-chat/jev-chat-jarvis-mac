@@ -4,10 +4,13 @@ import Quartz
 
 
 def input_outline(image):
-    """Find a long horizontal input border and its matching bottom border.
+    """Find the long separator above WeChat's message composer.
 
-    Only return a closed, wide lower panel. Coordinates are normalized top-origin;
-    no fixed sidebar width or input height is assumed. Ambiguous frames return None.
+    Older WeChat builds draw a closed rectangle around the composer. WeChat 4.x draws
+    only its top separator and left divider because the composer ends at the window
+    bottom. Accept either shape, but only let an open-bottom separator qualify when it
+    reaches the right window edge. Coordinates are normalized top-origin; no fixed
+    sidebar width or input height is assumed. Ambiguous frames return None.
     """
     width, height = Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image)
     w, h = 640, round(height * 640 / width)
@@ -44,8 +47,14 @@ def input_outline(image):
     bottoms = [(by, bl, br) for by,bl,br in rows
                if by > max(y+20,h*.90) and abs(bl-left)<12 and abs(br-right)<12]
     if not bottoms:
-        return None
-    by, bl, br = max(bottoms)
+        # WeChat 4.x has no lower stroke: the input panel simply continues to the
+        # bottom of the window. Requiring the detected separator to touch the right
+        # edge keeps message bubbles and other internal rules from becoming targets.
+        if right < w-12 or h-y < max(20,h*.08):
+            return None
+        by, bl, br = h-1, left, w-1
+    else:
+        by, bl, br = max(bottoms)
     return (min(left,bl)/w, y/h, (max(right,br)-min(left,bl))/w, (by-y)/h)
 
 
