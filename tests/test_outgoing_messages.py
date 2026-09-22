@@ -1,4 +1,4 @@
-"""Offline regressions for #11. Run: python -B -m unittest discover -s tests -v.
+"""Offline regressions for #11 and #14. Run: python -B -m unittest discover -s tests -v.
 
 Load the actual HUD methods through AST so the tests never start Cocoa, read the
 screen, load user credentials, or make model calls. Perception uses synthetic OCR.
@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from perception import TextBlock, extract_messages, find_wechat_window
+from perception import TextBlock, extract_chat_title, extract_messages, find_wechat_window
 
 
 def hud_harness():
@@ -50,6 +50,7 @@ def block(text, x, y, w, h=.035):
 
 class OutgoingTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch('input_region.locate_visual_input', return_value=None))
         self.h = h = Harness()
         HUD['read_conversation'].reset_mock()
         HUD['read_conversation'].side_effect = None
@@ -106,6 +107,38 @@ class OutgoingTests(unittest.TestCase):
 
     def incoming(self):
         self.read([block('下午开会', .40, .70, .15)])
+
+    def test_short_chat_titles_survive_header_controls(self):
+        for name in ('王', '张三', '李经理', 'A', '7', '项目讨论群'):
+            with self.subTest(name=name):
+                blocks = [block(name, .40, .94, .16, .025),
+                          block('...', .92, .96, .03, .025),
+                          block('口', .85, .94, .025, .025)]
+                self.assertEqual(extract_chat_title(blocks), name)
+
+    def test_title_fragments_join_without_distant_controls(self):
+        blocks = [block('项目讨论', .40, .94, .12, .025),
+                  block('组', .54, .945, .025, .025),
+                  block('口口', .85, .95, .05, .025),
+                  block('折叠聊天', .40, .905, .10, .025),
+                  block('侧栏联系人', .10, .94, .15, .025),
+                  block('下午开会', .40, .70, .15)]
+        self.assertEqual(extract_chat_title(blocks), '项目讨论 组')
+        self.assertEqual(extract_chat_title(blocks[2:]), '')
+
+    def test_switch_short_titles_with_same_message_invalidates_old_reply(self):
+        titles = [extract_chat_title([block(name, .40, .94, .10, .025)])
+                  for name in ('张三', '李经理')]
+        self.read([block('下午开会', .40, .70, .15)], title=titles[0])
+        epoch = self.h._reply_epoch
+        self.h._push_reply('applyCandidates:', 'old replies', epoch)
+        self.read([block('下午开会', .40, .70, .15)], title=titles[1])
+        self.assertGreater(self.h._reply_epoch, epoch)
+        self.assertEqual(self.h._reply_key, ('李经理', '下午开会'))
+        self.assertEqual(self.h._prejudge_req[0], '下午开会')
+        self.assertEqual(self.h._pregen_req[0], '下午开会')
+        self.flush()
+        self.h.applyCandidates_.assert_not_called()
 
     def test_only_own_short_message_never_enqueues_models(self):
         messages = self.read([block('11', .862, .284, .024, .024)])

@@ -417,19 +417,21 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
     """
     cands = [b for b in blocks
              if b.x >= CHAT_PANE_X_MIN and b.y > TITLE_BAR_Y_MAX
-             and b.conf >= 0.30 and len(b.text) >= 2 and not _is_noise(b)]
-    if not cands:
+             and not _is_noise(b)]
+    # ponytail: WeChat titles are left-aligned; centered headers need layout detection.
+    # Locate the title before considering the call/menu glyphs on the right. A real
+    # contact name can be just one character, so length cannot distinguish the two.
+    starts = [b for b in cands if b.x < (CHAT_PANE_X_MIN + 1) / 2]
+    if not starts:
         return ""
-    cands.sort(key=lambda b: (-b.y, -len(b.text)))
-    top_y = cands[0].y
-    band = [b for b in cands if top_y - b.y < 0.03]
-    # the header also contains the chat-info / call / menu glyphs, which OCR turns into
-    # short junk. The conversation name is by far the longest run of text up there.
-    longest = max(band, key=lambda b: len(b.text))
-    if len(longest.text) < 4:
-        return ""
-    keep = sorted((b for b in band if len(b.text) >= len(longest.text) * 0.5),
-                  key=lambda b: b.x)
+    top_y = max(b.y for b in starts)
+    band = sorted((b for b in cands if abs(top_y - b.y) < 0.03), key=lambda b: b.x)
+    keep = [band[0]]
+    for b in band[1:]:
+        # Join adjacent OCR fragments, including a short suffix; stop before controls.
+        if b.x - keep[-1].x_right > 1.5 * max(b.h, keep[-1].h):
+            break
+        keep.append(b)
     return " ".join(b.text for b in keep).strip()
 
 
