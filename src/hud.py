@@ -11,8 +11,8 @@ Design notes
     and are re-ordered in place when it lands.
   * The panel positions itself against WeChat's window each tick, so it follows moves,
     resizes and monitor changes without any window-server hooks.
-  * Palette is WeChat's light theme (see PALETTE below); the Appearance is pinned to Aqua
-    so the title bar and button bezels stay light even when the system is in dark mode.
+  * The HUD uses native macOS vibrancy with semantic WeChat green/amber/red accents. The
+    Appearance stays pinned to Aqua so labels and controls keep the same tested contrast.
   * 「填入」 writes through the Accessibility API into WeChat's input box (src/fill.py): no
     synthetic keystrokes, no clipboard, and nothing needs to be frontmost. It needs the
     Accessibility permission; when that is missing the HUD asks for it and reports the
@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 import AppKit
+import Quartz
 import sys
 
 from AppKit import (
@@ -37,7 +38,6 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBackgroundColorAttributeName,
     NSBezierPath,
-    NSBezelStyleRounded,
     NSButton,
     NSColor,
     NSFont,
@@ -94,8 +94,8 @@ JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, fas
 
 
 # ---------------------------------------------------------------- palette
-# WeChat's light theme: a #F7F7F7 surface, near-black body text, #888888 for anything
-# secondary, and the brand green/amber/red carrying the risk state.
+# Native light vibrancy with cool ink, quiet metadata and semantic risk colours. Alpha is
+# intentional: NSVisualEffectView supplies the material, these tints only establish depth.
 
 
 def _rgb(hex_code: int, alpha: float = 1.0) -> NSColor:
@@ -108,46 +108,38 @@ def _rgb(hex_code: int, alpha: float = 1.0) -> NSColor:
 
 
 PALETTE = {
-    "bg": _rgb(0xF7F7F7),     # panel surface
-    "text": _rgb(0x191919),   # judged message, intent, candidates, action advice
-    "muted": _rgb(0x888888),  # status, sender/context, confidence, percentages, headers
+    "bg": _rgb(0xF5F9F8, 0.74),
+    "text": _rgb(0x142038),   # judged message, intent, candidates, action advice
+    "muted": _rgb(0x7C879C),  # status, sender/context, confidence, percentages, headers
     "green": _rgb(0x07C160),  # WeChat brand green — risk 安全, success feedback
-    "amber": _rgb(0xFA9D3B),  # risk 留神
-    "red": _rgb(0xFA5151),    # risk 危险, failures
-    # The 话术 dropdown is drawn as a WeChat-style field: a flat light surface with a
-    # hairline, because the stock popup bezel brings the system accent colour (a blue
-    # chevron) into a panel that has no other system-accent pixel in it.
-    # A green-tinted variant of this field was tried to advertise clickability and
-    # rejected: next to the all-grey panel it read as a selection state and was jarring.
-    # Discoverability is handled by the popup's tooltip instead — zero visual footprint.
-    "field": _rgb(0xF2F2F2),
-    "edge": _rgb(0xE3E3E3),
+    "amber": _rgb(0xD99212),  # risk 留神
+    "red": _rgb(0xE95353),    # risk 危险, failures
+    "surface": _rgb(0xFFFFFF, 0.36),
+    "row": _rgb(0xFFFFFF, 0.24),
+    "field": _rgb(0xFFFFFF, 0.42),
+    "edge": _rgb(0xFFFFFF, 0.72),
+    "track": _rgb(0xB8C1C6, 0.42),
 }
 
-# Candidate row geometry. A row is 48 pt tall inside a 56 pt pitch, so rows keep the same
-# breathing room as before; prob and buttons share the text's bottom edge.
-CAND_BTN_W, CAND_BTN_H, CAND_BTN_GAP = 56, 24, 4
-CAND_BTN_X = PANEL_W - 14 - (2 * CAND_BTN_W + CAND_BTN_GAP)   # 230
-# Rank/percentage label ("#3 · 100%"): NSTextField's cell insets mean the widest string
-# actually consumes 63 px at 11 pt, so the old 48 px frame clipped the "%" off every row.
-# 72 px still clears that with 9 px to spare, and the 12 px it gives back go to the
-# candidate text — which needs them: at 116 px a 30-character candidate (the generation
-# prompt's own cap) lost its last two characters to the 3-line limit.
-CAND_PROB_X, CAND_PROB_W = 14, 72                              # 14 .. 86
-CAND_TEXT_X = CAND_PROB_X + CAND_PROB_W + 8                    # 94
-CAND_TEXT_W = CAND_BTN_X - CAND_TEXT_X - 8                     # 128
-CAND_TEXT_H = 48                                                # up to 3 wrapped lines
-CAND_ROW_H = 56                                                 # vertical pitch of one row
+# Compact reply rows: probability rail, fully wrapped reply, then the two existing actions.
+# Only the minimum is fixed. _relayout() measures each candidate and grows the row as needed.
+CAND_ROW_X, CAND_ROW_W, CAND_ROW_MIN_H = 20, PANEL_W - 40, 50
+CAND_PROB_X, CAND_PROB_W = 30, 44
+CAND_TEXT_X, CAND_TEXT_W = 82, 144
+CAND_BTN_W, CAND_BTN_H, CAND_BTN_GAP = 48, 22, 4
+CAND_BTN_X = PANEL_W - 26 - (2 * CAND_BTN_W + CAND_BTN_GAP)
+CAND_ROW_GAP = 4
 
 # 话术 groups. Each group is headed by its dropdown; its candidates sit under it. The panel
 # is only as tall as the groups in use, so nothing is reserved for a tone that is switched
 # off (that reservation is what used to leave a dead gap in the middle).
-TONE_DD_X, TONE_DD_W, TONE_DD_H, TONE_DD_GAP = 14, PANEL_W - 28, 24, 6
-TONE_DD_INSET = 6         # the popup sits this far inside its field, like text in an input box
-TONE_DD_FONT = 13         # bigger than the 11 pt labels: it is a control, and it is the one
+TONE_DD_X, TONE_DD_W, TONE_DD_H, TONE_DD_GAP = 20, PANEL_W - 40, 24, 5
+TONE_DD_INSET = 8         # the popup sits this far inside its field, like text in an input box
+TONE_DD_FONT = 12         # compact but still the clearest interactive label in each group
                           # thing on the panel the user is meant to click
-GROUP_GAP = 12            # between one group's rows and the next group's dropdown
-BOTTOM_PAD = 18           # below the last group
+GROUP_PAD_Y = 5           # breathing room above the selector and below the final reply
+GROUP_GAP = 10            # between one group's rows and the next group's dropdown
+BOTTOM_PAD = 14           # below the last group
 
 
 LOG_PATH = Path.home() / "Library" / "Logs" / "jev-jarvis.log"
@@ -229,8 +221,11 @@ class HudController(NSObject):
             self.slot_tones.append(styles.NONE_LABEL)
         self._dds: list = []
         self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
+        self._group_boxes: list = []    # translucent surfaces behind active tone groups
         self._rows: list = []
         self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
+        self._detail_views: list = []   # non-data chrome hidden with the expanded details
+        self._risk_dots: list = []      # low / medium / high indicators, presentation only
         self._group_top = 0             # where the first group starts, from the top
         self._title_h = 28              # measured right after the panel is built
         self.cand_texts: list[str | None] = [None] * (styles.MAX_SLOTS * styles.PER_TONE)
@@ -297,75 +292,117 @@ class HudController(NSObject):
             NSMakeRect(0, 0, PANEL_W, PANEL_H), style, NSBackingStoreBuffered, False)
         self.panel.setLevel_(AppKit.NSFloatingWindowLevel)
         self.panel.setOpaque_(False)
-        self.panel.setAlphaValue_(1.0)   # light surfaces go grey/washed out below 1.0
+        self.panel.setAlphaValue_(1.0)
+        self.panel.setHasShadow_(True)
         # The title bar and button bezels are drawn from the appearance, not from the
         # background colour, so pin Aqua: a dark-mode system would otherwise give a dark
         # title bar above a white panel.
         self.panel.setAppearance_(NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua))
-        self.panel.setBackgroundColor_(PALETTE["bg"])
+        self.panel.setBackgroundColor_(NSColor.clearColor())
         self.panel.setTitle_("jev-jarvis")
         self.panel.setHidesOnDeactivate_(False)
         self.panel.setBecomesKeyOnlyIfNeeded_(True)
 
-        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, PANEL_W, PANEL_H))
-        # Paint the panel colour on the view itself rather than leaning on the window's
-        # background colour: _relayout() grows and shrinks this view, and a region that
-        # appears after a resize is not reliably covered by the window behind it. It also
-        # makes offscreen renders (cacheDisplayInRect_) show what the screen shows — a
-        # transparent view renders black there and hides real layout problems.
+        # NSVisualEffectView is the native implementation of the reference's light frosted
+        # material. The tint keeps text readable when the wallpaper behind it is busy.
+        view = AppKit.NSVisualEffectView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, PANEL_W, PANEL_H))
+        view.setMaterial_(getattr(
+            AppKit, "NSVisualEffectMaterialSidebar",
+            getattr(AppKit, "NSVisualEffectMaterialLight", 1)))
+        view.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+        view.setState_(AppKit.NSVisualEffectStateActive)
         view.setWantsLayer_(True)
         view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
         self.rows: dict[str, NSTextField] = {}
 
-        # Layout order matters: the message being judged is the anchor of the panel,
-        # so it sits right under the title in the brightest, largest type.
-        # The full-width rows (PANEL_W - 28 = 332 px) cannot clip their widest string:
-        # "意图识别率 100%" measures 103 px at 12 pt.
-        # Every control is created once and then placed by _relayout(), which is what lets
-        # the panel change height when the tone selection changes.
-        self.settings_button = self._make_button(PANEL_W - 42, 0, 28, 28,
+        # The latest master adds model settings to this same header. Keep it as a quiet,
+        # standalone icon so the new control does not collide with the chat title.
+        self.settings_button = self._make_button(PANEL_W - 38, 0, 24, 24,
                                                  "", "openSettings:", 0)
         self.settings_button.setImage_(AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "gearshape", "模型设置"))
         self.settings_button.setImagePosition_(AppKit.NSImageOnly)
         self.settings_button.setBordered_(False)
         self.settings_button.setContentTintColor_(PALETTE["muted"])
+        self.settings_button.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
+        self.settings_button.layer().setBorderWidth_(0.0)
         self.settings_button.setToolTip_("模型设置")
         self.settings_button.setAccessibilityLabel_("模型设置")
         self.settings_button.setHidden_(False)
         view.addSubview_(self.settings_button)
-        self._fixed.append((self.settings_button, PANEL_W - 42, 24, 28, 28))
-        dy = 30
-        for key, size, color, bold, height in (
-            ("chat", 12, PALETTE["green"], True, 18),      # 群名 / 联系人
-            ("status", 10, PALETTE["muted"], False, 14),
-            ("message", 15, PALETTE["text"], False, 50),      # the message under analysis
-            ("sender", 10, PALETTE["muted"], False, 14),
-            ("intent", 21, PALETTE["text"], True, 28),
-            ("confidence", 12, PALETTE["muted"], False, 18),
-            ("risk", 14, PALETTE["green"], True, 20),
-            ("actions", 13, PALETTE["text"], False, 18),
+        self._fixed.append((self.settings_button, PANEL_W - 38, 10, 24, 24))
+
+        # Decorative surfaces are fixed; every string still comes from the existing rows.
+        for surface, x, top, w, h in (
+            (self._make_surface(12, PALETTE["surface"]), 14, 54, PANEL_W - 28, 62),
+            (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 72),
+            (self._make_surface(10, PALETTE["surface"]), 14, 204, PANEL_W - 28, 34),
         ):
-            width = PANEL_W - 68 if key == "chat" else PANEL_W - 28
-            tf = self._make_label(14, 0, width, height,
-                                  size=size, color=color, bold=bold)
-            if key == "message":
+            view.addSubview_(surface)
+            self._fixed.append((surface, x, top, w, h))
+            self._detail_views.append(surface)
+
+        # Summary separators and static labels carry no model data; they only make the
+        # existing intent/risk/action fields scan like the approved design.
+        for x in (150, 260):
+            divider = self._make_surface(0, PALETTE["edge"])
+            view.addSubview_(divider)
+            self._fixed.append((divider, x, 136, 1, 46))
+            self._detail_views.append(divider)
+
+        action_label = self._make_label(0, 0, 58, 16, size=11,
+                                        color=PALETTE["text"], bold=True)
+        action_label.setStringValue_("具体行动")
+        view.addSubview_(action_label)
+        self._fixed.append((action_label, 26, 213, 58, 16))
+        self._detail_views.append(action_label)
+
+        risk_title = self._make_label(0, 0, 64, 14, size=9, color=PALETTE["muted"])
+        risk_title.setStringValue_("风险等级")
+        view.addSubview_(risk_title)
+        self._fixed.append((risk_title, 272, 132, 64, 14))
+        self._detail_views.append(risk_title)
+        for i, (title, color) in enumerate((
+            ("低", PALETTE["green"]), ("中", PALETTE["amber"]), ("高", PALETTE["red"]))):
+            dot = self._make_surface(4, color.colorWithAlphaComponent_(0.28))
+            view.addSubview_(dot)
+            self._fixed.append((dot, 272 + i * 24, 160, 8, 8))
+            self._detail_views.append(dot)
+            self._risk_dots.append(dot)
+            label = self._make_label(0, 0, 12, 12, size=9, color=PALETTE["muted"])
+            label.setStringValue_(title)
+            view.addSubview_(label)
+            self._fixed.append((label, 282 + i * 24, 158, 12, 12))
+            self._detail_views.append(label)
+
+        for key, x, top, w, h, size, color, bold in (
+            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["green"], True),
+            ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
+            ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
+            ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
+            ("intent", 26, 136, 116, 26, 20, PALETTE["text"], True),
+            ("confidence", 26, 166, 116, 16, 11, PALETTE["muted"], False),
+            ("risk", 164, 137, 92, 24, 14, PALETTE["green"], True),
+            ("actions", 94, 213, 236, 16, 11, PALETTE["text"], False),
+        ):
+            tf = self._make_label(x, 0, w, h, size=size, color=color, bold=bold)
+            if key in {"message", "actions"}:
                 tf.cell().setWraps_(True)
             view.addSubview_(tf)
             self.rows[key] = tf
-            self._fixed.append((tf, 14, dy, width, height))
-            dy += height + 8
+            self._fixed.append((tf, x, top, w, h))
+            if key not in {"chat", "status"}:
+                self._detail_views.append(tf)
 
-        # ---- candidates section
-        dy += 6
-        header = self._make_label(14, 0, PANEL_W - 28, 16,
-                                  size=11, color=PALETTE["muted"])
+        header = self._make_label(18, 0, PANEL_W - 36, 18,
+                                  size=12, color=PALETTE["muted"], bold=True)
         header.setStringValue_("候选回复（按合适度排序）")
         view.addSubview_(header)
         self.rows["cand_header"] = header
-        self._fixed.append((header, 14, dy, PANEL_W - 28, 16))
-        dy += 22
-        self._group_top = dy
+        self._fixed.append((header, 18, 250, PANEL_W - 36, 18))
+        self._detail_views.append(header)
+        self._group_top = 274
 
         # ---- 话术 groups: each dropdown heads a group and its candidates sit underneath,
         # so the tone is labelled by the thing that selects it. Every group's controls exist
@@ -374,14 +411,11 @@ class HudController(NSObject):
         # still in flight.
         tone_items = styles.labels() + [styles.NONE_LABEL]
         for slot in range(styles.MAX_SLOTS):
-            # the field the popup sits in: a flat surface with a hairline, drawn by us so
-            # the control carries no system-accent chrome
-            box = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, TONE_DD_W, TONE_DD_H))
-            box.setWantsLayer_(True)
-            box.layer().setBackgroundColor_(PALETTE["field"].CGColor())
-            box.layer().setBorderColor_(PALETTE["edge"].CGColor())
-            box.layer().setBorderWidth_(1.0)
-            box.layer().setCornerRadius_(5.0)
+            group_box = self._make_surface(12, PALETTE["row"], PALETTE["edge"])
+            view.addSubview_(group_box)
+            self._group_boxes.append(group_box)
+
+            box = self._make_surface(8, PALETTE["field"], PALETTE["edge"])
             view.addSubview_(box)
             self._dd_boxes.append(box)
 
@@ -391,7 +425,8 @@ class HudController(NSObject):
             # the one discoverability aid the flat field gets: grey-on-grey reads as text,
             # a tooltip costs nothing visually and answers "can I click this?"
             pop.setToolTip_("点这里换话术（每种一组，各出 2 条）")
-            pop.setFont_(NSFont.systemFontOfSize_(TONE_DD_FONT))
+            pop.setFont_(NSFont.boldSystemFontOfSize_(TONE_DD_FONT))
+            pop.setContentTintColor_(PALETTE["text"])
             pop.addItemsWithTitles_(tone_items)
             pop.selectItemWithTitle_(self.slot_tones[slot])
             pop.setTarget_(self)
@@ -402,19 +437,31 @@ class HudController(NSObject):
             slot_rows = []
             for row in range(styles.PER_TONE):
                 tag = slot * styles.PER_TONE + row
-                prob = self._make_label(CAND_PROB_X, 0, CAND_PROB_W, 14,
-                                        size=11, color=PALETTE["muted"])
-                text = self._make_label(CAND_TEXT_X, 0, CAND_TEXT_W, CAND_TEXT_H,
-                                        size=12, color=PALETTE["text"])
+                row_box = self._make_surface(8, PALETTE["row"], PALETTE["edge"])
+                row_box.setHidden_(True)
+                view.addSubview_(row_box)
+                prob = self._make_label(CAND_PROB_X, 0, CAND_PROB_W, 32,
+                                        size=10, color=PALETTE["green"], bold=True)
+                prob.cell().setWraps_(True)
+                text = self._make_label(CAND_TEXT_X, 0, CAND_TEXT_W, 18,
+                                        size=11, color=PALETTE["text"])
                 text.cell().setWraps_(True)
+                text.cell().setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                if hasattr(text.cell(), "setMaximumNumberOfLines_"):
+                    text.cell().setMaximumNumberOfLines_(0)
                 copy_btn = self._make_button(CAND_BTN_X, 0, CAND_BTN_W, CAND_BTN_H,
                                              "复制", "copyCandidate:", tag)
                 fill_btn = self._make_button(CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, 0,
                                              CAND_BTN_W, CAND_BTN_H, "填入", "fillCandidate:", tag)
-                for c in (prob, text, copy_btn, fill_btn):
+                track = self._make_surface(2, PALETTE["track"])
+                fill_bar = self._make_surface(2, PALETTE["green"])
+                track.setHidden_(True)
+                fill_bar.setHidden_(True)
+                for c in (prob, text, copy_btn, fill_btn, track, fill_bar):
                     view.addSubview_(c)
-                slot_rows.append({"prob": prob, "text": text,
-                                  "btn": copy_btn, "fill_btn": fill_btn})
+                slot_rows.append({"box": row_box, "prob": prob, "text": text,
+                                  "btn": copy_btn, "fill_btn": fill_btn,
+                                  "track": track, "fill": fill_bar})
             self._rows.append(slot_rows)
 
         self.panel.setContentView_(view)
@@ -466,28 +513,49 @@ class HudController(NSObject):
         dy = self._group_top
         placements = []          # (control, x, dy_from_top, w, h)
         for slot in range(styles.MAX_SLOTS):
-            placements.append((self._dd_boxes[slot], TONE_DD_X, dy, TONE_DD_W, TONE_DD_H))
-            placements.append((self._dds[slot], TONE_DD_X + TONE_DD_INSET, dy,
-                               TONE_DD_W - 2 * TONE_DD_INSET, TONE_DD_H))
-            dy += TONE_DD_H + TONE_DD_GAP
             active = self._slot_active(slot)
+            self._group_boxes[slot].setHidden_(not active)
+            group_top = dy
+            selector_top = dy + (GROUP_PAD_Y if active else 0)
+            placements.append((self._dd_boxes[slot], TONE_DD_X, selector_top,
+                               TONE_DD_W, TONE_DD_H))
+            placements.append((self._dds[slot], TONE_DD_X + TONE_DD_INSET, selector_top,
+                               TONE_DD_W - 2 * TONE_DD_INSET, TONE_DD_H))
+            dy = selector_top + TONE_DD_H
+            if active:
+                dy += TONE_DD_GAP
             for row in range(styles.PER_TONE):
                 r = self._rows[slot][row]
-                controls = (r["prob"], r["text"], r["btn"], r["fill_btn"])
+                controls = self._row_controls(slot, row)
                 if active:
-                    # row height is reserved whether or not the candidates have arrived, so
-                    # nothing jumps when results land mid-generation
+                    # The candidate decides its own height. Short replies keep the compact
+                    # minimum; longer localized text grows without truncation.
+                    text_h = self._candidate_text_height(r["text"])
+                    row_h = max(CAND_ROW_MIN_H, text_h + 12)
+                    text_top = dy + (row_h - text_h) / 2
+                    button_top = dy + (row_h - CAND_BTN_H) / 2
+                    metric_top = dy + (row_h - 40) / 2
+                    progress_w = max(0.0, min(36.0, r["fill"].frame().size.width))
                     placements += [
-                        (r["text"], CAND_TEXT_X, dy, CAND_TEXT_W, CAND_TEXT_H),
-                        (r["prob"], CAND_PROB_X, dy + 34, CAND_PROB_W, 14),
-                        (r["btn"], CAND_BTN_X, dy + 24, CAND_BTN_W, CAND_BTN_H),
-                        (r["fill_btn"], CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, dy + 24,
+                        (r["box"], CAND_ROW_X, dy, CAND_ROW_W, row_h),
+                        (r["text"], CAND_TEXT_X, text_top, CAND_TEXT_W, text_h),
+                        (r["prob"], CAND_PROB_X, metric_top, CAND_PROB_W, 32),
+                        (r["btn"], CAND_BTN_X, button_top, CAND_BTN_W, CAND_BTN_H),
+                        (r["fill_btn"], CAND_BTN_X + CAND_BTN_W + CAND_BTN_GAP, button_top,
                          CAND_BTN_W, CAND_BTN_H),
+                        (r["track"], CAND_PROB_X + 4, metric_top + 36, 36, 4),
+                        (r["fill"], CAND_PROB_X + 4, metric_top + 36, progress_w, 4),
                     ]
-                    dy += CAND_ROW_H
+                    dy += row_h
+                    if row < styles.PER_TONE - 1:
+                        dy += CAND_ROW_GAP
                 else:
                     for c in controls:
                         c.setHidden_(True)
+            if active:
+                dy += GROUP_PAD_Y
+                placements.append((self._group_boxes[slot], 14, group_top,
+                                   PANEL_W - 28, dy - group_top))
             if slot < styles.MAX_SLOTS - 1:
                 dy += GROUP_GAP
 
@@ -570,6 +638,19 @@ class HudController(NSObject):
             alert.runModal()
 
     @objc.python_method
+    def _make_surface(self, radius: float, color: NSColor,
+                      border: NSColor | None = None) -> NSView:
+        """Layer-backed visual surface; it never owns or transforms application data."""
+        surface = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 1, 1))
+        surface.setWantsLayer_(True)
+        surface.layer().setBackgroundColor_(color.CGColor())
+        surface.layer().setCornerRadius_(radius)
+        if border is not None:
+            surface.layer().setBorderColor_(border.CGColor())
+            surface.layer().setBorderWidth_(0.75)
+        return surface
+
+    @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
         tf = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         tf.setStringValue_("")
@@ -583,12 +664,17 @@ class HudController(NSObject):
 
     @objc.python_method
     def _make_button(self, x, y, w, h, title, action, tag):
-        """A native rounded bezel with a WeChat-green label — reads correctly on #F7F7F7."""
+        """Compact native action with a light outline over the vibrancy material."""
         btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         btn.setTitle_(title)
-        btn.setBezelStyle_(NSBezelStyleRounded)
-        btn.setFont_(NSFont.systemFontOfSize_(11))
-        btn.setContentTintColor_(PALETTE["green"])
+        btn.setBordered_(False)
+        btn.setFont_(NSFont.systemFontOfSize_(10))
+        btn.setContentTintColor_(PALETTE["text"])
+        btn.setWantsLayer_(True)
+        btn.layer().setBackgroundColor_(PALETTE["row"].CGColor())
+        btn.layer().setBorderColor_(PALETTE["edge"].CGColor())
+        btn.layer().setBorderWidth_(0.75)
+        btn.layer().setCornerRadius_(CAND_BTN_H / 2)
         btn.setTarget_(self)
         btn.setAction_(action)
         btn.setTag_(tag)
@@ -617,17 +703,65 @@ class HudController(NSObject):
             tf.setTextColor_(color)
 
     @objc.python_method
+    def _candidate_text_height(self, field: NSTextField) -> float:
+        """Measure the full rendered reply so layout never relies on a character cutoff."""
+        text = field.stringValue()
+        if not text:
+            return 18
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            text, {NSFontAttributeName: field.font()})
+        options = (AppKit.NSStringDrawingUsesLineFragmentOrigin
+                   | AppKit.NSStringDrawingUsesFontLeading)
+        bounds = attributed.boundingRectWithSize_options_(
+            NSMakeSize(CAND_TEXT_W, 10_000), options)
+        return max(18, float(int(bounds.size.height + 4.999)))
+
+    @objc.python_method
+    def _set_progress(self, slot: int, row: int, value: float | None):
+        """Paint the existing rank probability; the model payload is never changed."""
+        r = self._rows[slot][row]
+        progress = max(0.0, min(1.0, float(value or 0.0)))
+        frame = r["fill"].frame()
+        r["fill"].setFrameSize_(NSMakeSize(36 * progress, frame.size.height or 4))
+
+    @objc.python_method
+    def _set_risk_scale(self, risk: int | None):
+        selected = None if risk is None else (0 if risk <= 3 else (1 if risk <= 6 else 2))
+        colors = (PALETTE["green"], PALETTE["amber"], PALETTE["red"])
+        for i, dot in enumerate(self._risk_dots):
+            layer = dot.layer()
+            layer.removeAnimationForKey_("risk-breathe")
+            alpha = 1.0 if i == selected else 0.28
+            layer.setBackgroundColor_(colors[i].colorWithAlphaComponent_(alpha).CGColor())
+            layer.setShadowOpacity_(0.0)
+            if i == selected:
+                layer.setShadowColor_(colors[i].CGColor())
+                layer.setShadowOffset_(NSMakeSize(0, 0))
+                layer.setShadowRadius_(4.0)
+                layer.setShadowOpacity_(0.55)
+                pulse = Quartz.CABasicAnimation.animationWithKeyPath_("opacity")
+                pulse.setFromValue_(0.48)
+                pulse.setToValue_(1.0)
+                pulse.setDuration_(1.2)
+                pulse.setAutoreverses_(True)
+                pulse.setRepeatCount_(float("inf"))
+                pulse.setTimingFunction_(Quartz.CAMediaTimingFunction.functionWithName_(
+                    Quartz.kCAMediaTimingFunctionEaseInEaseOut))
+                layer.addAnimation_forKey_(pulse, "risk-breathe")
+
+    @objc.python_method
     def _row_controls(self, slot: int, row: int):
         r = self._rows[slot][row]
-        return (r["prob"], r["text"], r["btn"], r["fill_btn"])
+        return (r["box"], r["prob"], r["text"], r["btn"], r["fill_btn"],
+                r["track"], r["fill"])
 
     @objc.python_method
     def _render_groups(self, payload: list):
         """payload: [(slot, tone, [{"text","prob"}, ...]), ...] — one entry per active tone.
 
-        Rows the model did not fill are emptied and their buttons hidden, but the row keeps
-        its space: the panel's height is decided by the tone selection, not by how many lines
-        came back, so a late result cannot resize the panel under the cursor.
+        Rows the model did not fill are emptied and their buttons hidden. Every active tone
+        still reserves its two minimum rows, while a returned long reply expands only its own
+        row so the complete text remains visible.
         """
         wanted = set()
         for slot, _tone, items in payload:
@@ -637,8 +771,9 @@ class HudController(NSObject):
                     wanted.add((slot, row))
                     r = self._rows[slot][row]
                     prob = "排序中" if it["prob"] is None else f"{it['prob'] * 100:.0f}%"
-                    r["prob"].setStringValue_(f"#{row + 1} · {prob}")
+                    r["prob"].setStringValue_(f"#{row + 1}\n{prob}")
                     r["text"].setStringValue_(it["text"])
+                    self._set_progress(slot, row, it["prob"])
                     for c in self._row_controls(slot, row):
                         c.setHidden_(not self._slot_active(slot))
                     self.cand_texts[slot * styles.PER_TONE + row] = it["text"]
@@ -648,8 +783,9 @@ class HudController(NSObject):
                     r = self._rows[slot][row]
                     r["prob"].setStringValue_("")
                     r["text"].setStringValue_("")
-                    r["btn"].setHidden_(True)
-                    r["fill_btn"].setHidden_(True)
+                    self._set_progress(slot, row, None)
+                    for c in self._row_controls(slot, row):
+                        c.setHidden_(True)
                     self.cand_texts[slot * styles.PER_TONE + row] = None
         self._relayout()
 
@@ -660,8 +796,9 @@ class HudController(NSObject):
                 r = self._rows[slot][row]
                 r["prob"].setStringValue_("")
                 r["text"].setStringValue_("")
-                r["btn"].setHidden_(True)
-                r["fill_btn"].setHidden_(True)
+                self._set_progress(slot, row, None)
+                for c in self._row_controls(slot, row):
+                    c.setHidden_(True)
                 self.cand_texts[slot * styles.PER_TONE + row] = None
 
     @objc.python_method
@@ -933,6 +1070,8 @@ class HudController(NSObject):
             self._render("intent", "—", PALETTE["muted"])
             self._render("confidence", "", PALETTE["muted"])
             self._render("risk", "", PALETTE["muted"])
+            if hasattr(self, "_risk_dots"):
+                self._set_risk_scale(None)
             self._render("actions", "", PALETTE["text"])
             self.rows["cand_header"].setStringValue_("")
             self._clear_candidates()
@@ -962,9 +1101,12 @@ class HudController(NSObject):
                       "cand_header"]   # "chat" and "status" survive collapsing
         for key in controlled:
             self.rows[key].setHidden_(collapsed)
+        for view in self._detail_views:
+            view.setHidden_(collapsed)
         for slot in range(styles.MAX_SLOTS):
             self._dds[slot].setHidden_(collapsed)
             self._dd_boxes[slot].setHidden_(collapsed)
+            self._group_boxes[slot].setHidden_(collapsed or not self._slot_active(slot))
             for row in range(styles.PER_TONE):
                 has = self.cand_texts[slot * styles.PER_TONE + row] is not None
                 for c in self._row_controls(slot, row):
@@ -1494,6 +1636,8 @@ class HudController(NSObject):
         self._stream_rows = {}
         for key in ("message", "sender", "intent", "confidence", "risk", "actions"):
             self._render(key, "", PALETTE["muted"])
+        if hasattr(self, "_risk_dots"):
+            self._set_risk_scale(None)
         self.rows["cand_header"].setStringValue_("候选回复")
         self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
 
@@ -1553,6 +1697,8 @@ class HudController(NSObject):
         color = PALETTE["green"] if risk <= 3 else (
             PALETTE["amber"] if risk <= 6 else PALETTE["red"])
         self._render("risk", f"● {label}  {risk}/9", color)
+        if hasattr(self, "_risk_dots"):
+            self._set_risk_scale(risk)
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
         self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
         # the verdict landing starts a new candidate run: without this reset, the streamed
@@ -1586,10 +1732,12 @@ class HudController(NSObject):
         if self._collapsed:
             return      # collapse keeps the data; _set_collapsed(False) puts it back up
         r = self._rows[slot][row]
-        r["prob"].setStringValue_(f"#{row + 1}")
+        r["prob"].setStringValue_(f"#{row + 1}\n排序中")
         r["text"].setStringValue_(text)
+        self._set_progress(slot, row, None)
         for c in self._row_controls(slot, row):
             c.setHidden_(False)
+        self._relayout()
 
     def applyError_(self, text):
         self._show()                       # never vanish without telling the user why
