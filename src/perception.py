@@ -58,7 +58,7 @@ class TextBlock:
 @dataclass
 class Message:
     text: str
-    side: str          # "them" | "me"
+    side: str          # "them" | "me" | "unknown"
     y: float           # normalized, top-origin for readability
     conf: float
     h: float = 0.0
@@ -390,6 +390,21 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
     return " ".join(b.text for b in keep).strip()
 
 
+def message_side(x: float, width: float) -> str:
+    """Conservative text geometry: a center alone cannot identify a wide bubble.
+
+    Only accept text anchored clearly to one side of the calibrated chat pane.
+    Wide text spanning both anchors and isolated central fragments are ambiguous;
+    keep them for context/overlay, but never treat them as an incoming reply target.
+    """
+    right = x + width
+    if x >= 0.66 or (x >= 0.50 and right >= 0.80):
+        return "me"
+    if x <= 0.50 and right < 0.80:
+        return "them"
+    return "unknown"
+
+
 def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Message]:
     """Turn raw OCR blocks into an ordered list of chat messages (bottom = newest)."""
     chat = [b for b in blocks
@@ -425,32 +440,32 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
                                 w=max(b.x_right for b in group) - min(b.x for b in group),
                                 h=max(b.h for b in group)))
 
-    # left/right split inside the chat pane: the pane spans CHAT_PANE_X_MIN..1.0,
-    # so its midline is (CHAT_PANE_X_MIN + 1.0) / 2
-    midline = (CHAT_PANE_X_MIN + 1.0) / 2
-
     # fold continuation lines (same side, tight vertical gap, no new sender header)
     per_line = sorted(merged, key=lambda b: b.y)
     messages: list[Message] = []
     for b in per_line:
-        side = "me" if b.x_center > midline else "them"
+        side = message_side(b.x, b.w)
         # fold against the LAST folded line, not the message's first: comparing against
         # the first line made every line from the third on measure ≥2 line-pitches away,
         # so any 3+ line message was split into ≤2-line chunks — the judge then only ever
         # saw the tail chunk, and the overlay drew a box per chunk
         gap = (b.y - messages[-1].last_y) if messages else 1.0
-        # A shorter continuation has a different center but belongs to the same bubble.
-        if messages and gap < 0.045 and abs(b.x - messages[-1].x) < 0.01:
-            side = messages[-1].side
-        if messages and messages[-1].side == side and gap < 0.045:
+        # OCR can shift a short continuation's left edge slightly. Group by alignment,
+        # then classify the full bounds rather than inheriting a possibly wrong first line.
+        aligned = messages and abs(b.x - messages[-1].x) < 0.02
+        compatible = messages and (side == messages[-1].side
+                                   or "unknown" in (side, messages[-1].side))
+        if aligned and compatible and 0 <= gap < 0.045:
             messages[-1].lines.append(b.text)
             messages[-1].text = "\n".join(messages[-1].lines)
             messages[-1].conf = min(messages[-1].conf, b.conf)
             # grow the bounding box to cover the folded line (m.y stays the top line's)
             m = messages[-1]
             bottom = max(m.y + m.h, b.y + b.h)
+            right = max(m.x + m.w, b.x_right)
             m.x = min(m.x, b.x)
-            m.w = max(m.x + m.w, b.x + b.w) - m.x
+            m.w = right - m.x
+            m.side = message_side(m.x, m.w)
             m.h = bottom - m.y
             m.last_y = b.y
         else:
