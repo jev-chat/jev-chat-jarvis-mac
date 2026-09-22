@@ -38,8 +38,11 @@ class EndpointCompositionTests(unittest.TestCase):
     def test_verbatim_action_detection(self):
         self.assertTrue(base_is_verbatim_action('https://ai-gateway.vercel.sh/v1/evaluate'))
         self.assertTrue(base_is_verbatim_action('https://ai-gateway.vercel.sh/v1/evaluate/'))
+        self.assertTrue(base_is_verbatim_action('https://openrouter.ai/api/alpha/decisions'))
+        self.assertTrue(base_is_verbatim_action('https://openrouter.ai/api/alpha/decisions/'))
         self.assertFalse(base_is_verbatim_action('https://gw.example.com/v1'))
         self.assertFalse(base_is_verbatim_action('https://gw.example.com/api'))
+        self.assertFalse(base_is_verbatim_action('https://gw.example.com/api/jev'))
         self.assertFalse(base_is_verbatim_action('https://api.typesafe.ai'))
         self.assertFalse(base_is_verbatim_action(None))
 
@@ -54,6 +57,8 @@ class EndpointCompositionTests(unittest.TestCase):
              'http://101.132.131.220:11111/v1/systemone'),                   # 用户群实例
             ('https://ai-gateway.vercel.sh/v1/evaluate',
              'https://ai-gateway.vercel.sh/v1/evaluate'),                    # 网关动作段不同
+            ('https://openrouter.ai/api/alpha/decisions',
+             'https://openrouter.ai/api/alpha/decisions'),                   # OpenRouter (#51)：次末段非版本段，靠动作词判定
             ('https://gw.example.com/api', 'https://gw.example.com/api/v1/systemone'),  # 前缀，历史行为
             ('https://gw.example.com/api/jev', 'https://gw.example.com/api/jev/v1/systemone'),
         ]

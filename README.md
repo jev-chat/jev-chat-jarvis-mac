@@ -107,7 +107,7 @@ chmod 600 ~/.config/jev-jarvis/env
 ```
 
 - **凭据解析以 key 为准**：提供 key 的来源同时决定端点和模型。实测可用：DeepSeek `deepseek-chat`（最快）；智谱 `glm-4-flash`（换 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`，两组都填 OpenAI 组优先）；本地 Ollama `qwen2.5:7b`（完全不出网）
-- **判断层网关**：`TYPESAFE_BASE_URL` 三种填法等价可用——只到主机（`https://api.typesafe.ai`）、带版本段（`…/v1`，自动补动作段，不会出现 `/v1/v1/…`）、或填完整动作路径（填到动作段为止，原样使用、不再拼接）。第三方 TypeSafe 兼容网关填网关地址 + 网关 key，模型名按网关填写（如 Vercel AI Gateway 填 `https://ai-gateway.vercel.sh/v1/evaluate`、模型 `typesafe-ai/jev`）
+- **判断层网关**：`TYPESAFE_BASE_URL` 三种填法等价可用——只到主机（`https://api.typesafe.ai`）、带版本段（`…/v1`，自动补动作段，不会出现 `/v1/v1/…`）、或填完整动作路径（填到动作段为止，原样使用、不再拼接）。第三方 TypeSafe 兼容网关填网关地址 + 网关 key，模型名按网关填写（如 Vercel AI Gateway 填 `https://ai-gateway.vercel.sh/v1/evaluate`、模型 `typesafe-ai/jev`；OpenRouter 填 `https://openrouter.ai/api/alpha/decisions`、模型 `typesafe/jev-1.13`，key 用 OpenRouter 的 `sk-or-…`，响应同为 systemone 形状）
 - **别用 thinking 模型**：思考吃光 `max_tokens`，候选 0 条，面板只报「候选生成失败」——DeepSeek 认准 `deepseek-chat`
 - **自定义话术**：env 加一行 `JEV_TONES`（`|` 分隔、每条「名字=说明」，同名覆盖内置，重启生效），如 `摸鱼大师=像资深摸鱼选手，把活推得漂亮又不失礼`；说明写清「什么语气 + 别变成什么」最管用
 - 自查凭据（不打印完整 key）：`uv run python src/generate.py --check`、`uv run python src/judge_jev.py`

@@ -209,13 +209,15 @@ def base_has_version_segment(base: str) -> bool:
 
 
 def base_is_verbatim_action(base: str) -> bool:
-    """True when base already ends in version+action (`…/v1/evaluate`): use it as-is.
+    """True when base is already a complete request URL: use it as-is.
 
     Gateways do not even agree on the action name — Vercel AI Gateway exposes TypeSafe
-    under `/v1/evaluate`, not `/v1/systemone` (#42) — so a base ending in
-    `<version>/<segment>` is taken as a complete request URL. A plain prefix like
-    `…/api` does NOT match (the segment before last is not a version), keeping the
-    pre-existing `…/api/v1/systemone` behaviour for gateway path prefixes.
+    under `/v1/evaluate`, not `/v1/systemone` (#42), and OpenRouter serves its Decisions
+    API under `/api/alpha/decisions` (#51), whose second-to-last segment is `alpha`, not
+    a version. So a base ending in `<version>/<segment>` OR a known action word is taken
+    as complete. The action list is closed on purpose: a plain prefix like `…/api` or
+    `…/api/jev` must keep composing to `…/<prefix>/v1/systemone` (pre-existing
+    behaviour).
 
     Known edge: a gateway that hangs a NAMESPACE prefix under its version segment
     (`…/v1/typesafe`) also matches and is used verbatim — the rule cannot tell an
@@ -223,8 +225,11 @@ def base_is_verbatim_action(base: str) -> bool:
     do not expect `/systemone` to be appended after an arbitrary prefix.
     """
     segs = _base_segments(base)
-    return (len(segs) >= 2
-            and bool(_VERSION_SEG.fullmatch(segs[-2].lower())))
+    if not segs:
+        return False
+    if len(segs) >= 2 and bool(_VERSION_SEG.fullmatch(segs[-2].lower())):
+        return True
+    return segs[-1].lower() in {"systemone", "evaluate", "decisions"}
 
 
 def jev_request_url(base: str) -> str:
