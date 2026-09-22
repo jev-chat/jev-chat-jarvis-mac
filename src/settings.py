@@ -10,6 +10,7 @@ import objc
 from Foundation import NSObject, NSMakeRect
 
 import builtin
+import judge
 import userconfig
 import settings_config as config
 import ui_style
@@ -30,7 +31,7 @@ class SettingsController(NSObject):
         self.controls = []
         self.busy = False
         self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 760, 600),
+            NSMakeRect(0, 0, 760, 648),
             A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable,
             A.NSBackingStoreBuffered, False)
         self.window.setAppearance_(A.NSAppearance.appearanceNamed_(A.NSAppearanceNameAqua))
@@ -42,7 +43,7 @@ class SettingsController(NSObject):
         self.window.setLevel_(A.NSFloatingWindowLevel + 1)
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
-        view = A.NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 760, 600))
+        view = A.NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 760, 648))
         view.setMaterial_(getattr(
             A, "NSVisualEffectMaterialSidebar",
             getattr(A, "NSVisualEffectMaterialLight", 1)))
@@ -52,25 +53,25 @@ class SettingsController(NSObject):
         view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
         self.window.setContentView_(view)
 
-        title = self.label(view, "模型设置", 24, 550, 710, 28, 22)
+        title = self.label(view, "模型设置", 24, 598, 710, 28, 22)
         title.setFont_(A.NSFont.boldSystemFontOfSize_(22))
         title.setTextColor_(PALETTE["text"])
         self.label(view, "编辑文件：" + str(self.path).replace(str(Path.home()), "~"),
-                   24, 522, 710, 20, 11, PALETTE["muted"])
+                   24, 570, 710, 20, 11, PALETTE["muted"])
 
         restart_box = ui_style.make_surface(
             10, PALETTE["amber"].colorWithAlphaComponent_(0.10),
             PALETTE["amber"].colorWithAlphaComponent_(0.18))
-        restart_box.setFrame_(NSMakeRect(24, 482, 710, 34))
+        restart_box.setFrame_(NSMakeRect(24, 530, 710, 34))
         view.addSubview_(restart_box)
         restart_notice = self.label(view, "保存后请退出应用并重启",
-                                    38, 488, 680, 20, 13, PALETTE["amber"])
+                                    38, 536, 680, 20, 13, PALETTE["amber"])
         restart_notice.setFont_(A.NSFont.boldSystemFontOfSize_(13))
 
         tab_surface = ui_style.make_surface(14, PALETTE["surface"], PALETTE["edge"])
-        tab_surface.setFrame_(NSMakeRect(16, 128, 728, 342))
+        tab_surface.setFrame_(NSMakeRect(16, 176, 728, 342))
         view.addSubview_(tab_surface)
-        self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(24, 136, 712, 326))
+        self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(24, 184, 712, 326))
         if hasattr(self.tabs, "setDrawsBackground_"):
             self.tabs.setDrawsBackground_(False)
         titles = ("判断 · Jev", "生成 · OpenAI 兼容", "生成 · Anthropic 兼容")
@@ -124,6 +125,19 @@ class SettingsController(NSObject):
             item.setView_(panel)
             self.tabs.addTabViewItem_(item)
         view.addSubview_(self.tabs)
+        # #38: 离线判断模型管理。删除是显式确认动作；「启用」只写选择，真正的
+        # 下载发生在下次启动的预热——设置窗口里不藏一个 7 GB 的下载按钮。
+        offline_surface = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
+        offline_surface.setFrame_(NSMakeRect(24, 126, 710, 44))
+        view.addSubview_(offline_surface)
+        self.offline_label = self.label(view, "", 36, 140, 540, 20, 11, PALETTE["text"])
+        self.offline_delete_btn = self.button(view, "删除模型…", "deleteOfflineModel:",
+                                              596, 132, 118)
+        self.offline_enable_btn = self.button(view, "启用离线判断…", "enableOfflineModel:",
+                                              596, 132, 118)
+        self.controls.append(self.offline_delete_btn)
+        self.controls.append(self.offline_enable_btn)
+        self.refresh_offline_section()
         priority_surface = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
         priority_surface.setFrame_(NSMakeRect(24, 74, 710, 44))
         view.addSubview_(priority_surface)
@@ -211,6 +225,71 @@ class SettingsController(NSObject):
         button.setAction_(action)
         view.addSubview_(button)
         return button
+
+    @objc.python_method
+    def refresh_offline_section(self):
+        cached = judge.model_cached()
+        if cached:
+            text = f"离线判断模型：已下载（{judge.model_disk_usage() / 2**30:.1f} GB 磁盘占用）"
+            if userconfig.get("JUDGE_BACKEND").strip().lower() == "cloud":
+                text += " · 当前选择在线判断"
+        else:
+            text = "离线判断模型：未下载 · 启用后下次启动预热时下载（约 7 GB）"
+        self.offline_label.setStringValue_(text)
+        self.offline_delete_btn.setHidden_(not cached)
+        self.offline_enable_btn.setHidden_(cached)
+
+    def deleteOfflineModel_(self, sender):
+        alert = A.NSAlert.alloc().init()
+        alert.setMessageText_("删除离线判断模型？")
+        alert.setInformativeText_("之后使用离线判断需重新下载（约 7 GB）。正在运行的应用不受影响，重启后生效。")
+        alert.addButtonWithTitle_("删除")
+        alert.addButtonWithTitle_("取消")
+        if alert.runModal() != A.NSAlertFirstButtonReturn:
+            return
+        sender.setEnabled_(False)
+        self.set_status("正在删除离线判断模型…")
+        threading.Thread(target=self._delete_model_work, daemon=True).start()
+
+    @objc.python_method
+    def _delete_model_work(self):
+        import shutil
+        error = ""
+        try:
+            shutil.rmtree(judge.model_cache_dir())
+        except OSError as e:
+            error = str(e)
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "modelDeleted:", error, False)
+
+    def modelDeleted_(self, error):
+        self.refresh_offline_section()
+        if error:
+            self.set_status(f"删除失败：{error[:80]}", "error")
+        else:
+            self.set_status("已删除离线判断模型。正在运行的判断不受影响；删除的文件不可恢复。", "success")
+
+    def enableOfflineModel_(self, sender):
+        alert = A.NSAlert.alloc().init()
+        alert.setMessageText_("启用离线判断？")
+        alert.setInformativeText_("下次启动的预热将下载判断模型（约 7 GB，一次性），之后判断完全离线进行。")
+        alert.addButtonWithTitle_("启用")
+        alert.addButtonWithTitle_("取消")
+        if alert.runModal() != A.NSAlertFirstButtonReturn:
+            return
+        try:
+            self.original = config.write_settings(self.path, self.original,
+                                                  {"JUDGE_BACKEND": "local"})
+        except ValueError as e:
+            self.set_status(str(e), "error")
+            return
+        except OSError:
+            self.set_status("保存失败：请检查文件权限及可用磁盘空间。", "error")
+            return
+        self.file_values["JUDGE_BACKEND"] = "local"
+        self.refresh_offline_section()
+        self.set_status("已启用离线判断（写入 JUDGE_BACKEND=local）。请退出并重新打开应用，预热时开始下载。",
+                        "success")
 
     @objc.python_method
     def show(self):

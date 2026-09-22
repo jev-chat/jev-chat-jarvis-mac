@@ -72,7 +72,7 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 
 ## 配置
 
-两层、两个 key、**都可以不填**：判断层不填走本地 decider-2b（首次下载约 7 GB）；生成层打包版内置共享 key，不配也能出候选，数据流向见 [PRIVACY.md](PRIVACY.md)。全部配置在一个 env 文件（**不提供第二种格式**）：
+两层、两个 key、**都可以不填**：判断层不填时首次启动会引导选择——配置 key 在线判断，或下载离线模型（约 7 GB）；也可以稍后再说，面板会持续提示。生成层打包版内置共享 key，不配也能出候选，数据流向见 [PRIVACY.md](PRIVACY.md)。全部配置在一个 env 文件（**不提供第二种格式**）：
 
 ### 可视化配置（#18）
 
@@ -108,6 +108,7 @@ chmod 600 ~/.config/jev-jarvis/env
 
 - **凭据解析以 key 为准**：提供 key 的来源同时决定端点和模型。实测可用：DeepSeek `deepseek-chat`（最快）；智谱 `glm-4-flash`（换 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`，两组都填 OpenAI 组优先）；本地 Ollama `qwen2.5:7b`（完全不出网）
 - **判断层网关**：`TYPESAFE_BASE_URL` 三种填法等价可用——只到主机（`https://api.typesafe.ai`）、带版本段（`…/v1`，自动补动作段，不会出现 `/v1/v1/…`）、或填完整动作路径（填到动作段为止，原样使用、不再拼接）。第三方 TypeSafe 兼容网关填网关地址 + 网关 key，模型名按网关填写（如 Vercel AI Gateway 填 `https://ai-gateway.vercel.sh/v1/evaluate`、模型 `typesafe-ai/jev`；OpenRouter 填 `https://openrouter.ai/api/alpha/decisions`、模型 `typesafe/jev-1.13`，key 用 OpenRouter 的 `sk-or-…`，响应同为 systemone 形状）
+- **判断方式选择（`JUDGE_BACKEND`）**：首次启动（未配判断层 key 且离线模型未下载）会弹一次选择，结果写进 env：`cloud`=在线判断（不下载、不加载本地模型）、`local`=离线判断（预热时下载，选过就不再问）、`skip`=稍后再说（不再弹，消息时面板提示）。不写此键时：模型已在本地就照常使用，未下载则**不会自动下载**，面板提示引导。模型设置的「判断 · Jev」页可删除离线模型（显示实际占用）或启用离线判断
 - **别用 thinking 模型**：思考吃光 `max_tokens`，候选 0 条，面板只报「候选生成失败」——DeepSeek 认准 `deepseek-chat`
 - **自定义话术**：env 加一行 `JEV_TONES`（`|` 分隔、每条「名字=说明」，同名覆盖内置，重启生效），如 `摸鱼大师=像资深摸鱼选手，把活推得漂亮又不失礼`；说明写清「什么语气 + 别变成什么」最管用
 - 自查凭据（不打印完整 key）：`uv run python src/generate.py --check`、`uv run python src/judge_jev.py`
@@ -116,7 +117,7 @@ chmod 600 ~/.config/jev-jarvis/env
 
 | 内容 | 位置 | 大小 | 清理 |
 |---|---|---|---|
-| 判断层本地模型 `decider-2b`（不配判断层 key 才会下载，判断+排序共用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~7 GB | `rm -rf ~/.cache/huggingface/hub/models--Mapika--decider-2b`；之后走本地判断会重新下载 |
+| 判断层本地模型 `decider-2b`（首次启动引导选择后才下载，判断+排序共用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~7 GB | 模型设置 →「判断 · Jev」页「删除模型…」；或 `rm -rf ~/.cache/huggingface/hub/models--Mapika--decider-2b`；之后走本地判断会重新下载 |
 | Python 运行环境（venv） | `~/Library/Application Support/jev-jarvis/venv` | ~0.7 GB | 删除 .app 不会连带删它，需手动删 |
 
 生成层配 Ollama 的话模型在 Ollama 自己的目录（`~/.ollama`），非本项目下载。
@@ -128,7 +129,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - 图片/表情包读不出内容；引用回复当普通文本；公众号卡片可能被当消息解读；微信全屏布局下识别可能失效（布局常量待动态化，见 #17）
 - 微信改版会让布局常量失效（`src/perception.py` 顶部常量需重新校准）；多窗口优先识别主窗口「微信 / WeChat」
 - 启动后第一条判断慢是正常现象（本地模型预热）；不对劲先看日志（分阶段耗时、**不含消息正文**，可放心贴 issue）：`tail -40 ~/Library/Logs/jev-jarvis.log`
-- 本地判断模型首次加载（含下载）期间面板状态行显示「判断模型加载中…」；加载失败会红字提示。内存不足（总内存 < 12GB，或系统内存压力已在警告档）时**不加载本地模型**，每条消息的面板提示会引导改配 `TYPESAFE_API_KEY` 走云端判断——这是为了防止 #37 那种加载把系统推入内存高压、进程被系统直接终止的情况
+- 本地判断模型首次加载（含下载）期间面板状态行显示「判断模型加载中…」；加载失败会红字提示。离线模型未下载时不会自动下载，面板与预热提示会引导选择（配 key 走云端，或模型设置里启用离线判断）。内存不足（总内存 < 12GB，或系统内存压力已在警告档）时**不加载本地模型**，每条消息的面板提示会引导改配 `TYPESAFE_API_KEY` 走云端判断——这是为了防止 #37 那种加载把系统推入内存高压、进程被系统直接终止的情况
 
 ## 输入区检测框与填入
 

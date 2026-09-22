@@ -15,6 +15,8 @@ import threading
 
 import numpy as np
 
+import userconfig
+
 # 描述保持这个长度是有实测依据的，别为了省 prefill 时间去瘦身：两轮压缩措辞
 # （保语义锚点、每条砍 ~1/3 字符）在 22 条回归上分别是 81.8% 和 77.3%，都低于
 # 原文的 86.4%——批评/要解释 的边界对措辞极敏感。省下的 ~100 ms 判断又藏在
@@ -59,6 +61,105 @@ ACTION_MAP = {
 
 class LowMemoryError(RuntimeError):
     """The memory guard refused to load the local model (see low_memory_reason)."""
+
+
+class ModelNotDownloadedError(RuntimeError):
+    """The local model is not cached and the user has not opted into downloading (#38).
+
+    The 7 GB download used to start silently on first launch — or, worse, mid-session
+    when the cloud judge hiccuped and FallbackJudge reached for the local model. The
+    refusal text is written for the user and names both ways out; callers display it
+    verbatim (see hud._run_analysis / _warm).
+    """
+
+
+def model_cache_dir(repo: str = "Mapika/decider-2b") -> str:
+    """The model's HF cache root, following huggingface_hub's resolution order
+    (HF_HUB_CACHE > HF_HOME/hub > ~/.cache/huggingface/hub) without importing the hub:
+    judge stays import-light so the CLI self-tests keep working on machines without
+    transformers. Also the directory the settings window deletes (#38).
+    """
+    base = os.environ.get("HF_HUB_CACHE")
+    if not base:
+        home = os.environ.get("HF_HOME")
+        base = os.path.join(home, "hub") if home else os.path.expanduser(
+            "~/.cache/huggingface/hub")
+    return os.path.join(base, "models--" + repo.replace("/", "--"))
+
+
+def model_cached(repo: str = "Mapika/decider-2b") -> bool:
+    """True when the HF cache already holds the model weights — never touches the network.
+
+    A snapshot counts only when it actually contains weights: isfile() resolves the
+    snapshot's symlinks into blobs/, so an interrupted or partially-cleaned download
+    (dangling weight links, blob-less snapshot) reads as not cached — otherwise the gate
+    would let from_pretrained silently re-download all ~7 GB (#38).
+    """
+    snapshots = os.path.join(model_cache_dir(repo), "snapshots")
+    try:
+        for entry in os.listdir(snapshots):
+            path = os.path.join(snapshots, entry)
+            if not os.path.isdir(path):
+                continue
+            try:
+                if any(f.endswith((".safetensors", ".bin"))
+                       and os.path.isfile(os.path.join(path, f))
+                       for f in os.listdir(path)):
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
+
+
+def model_disk_usage(repo: str = "Mapika/decider-2b") -> int:
+    """Bytes the cached model actually occupies on disk, 0 when absent.
+
+    Every file in the model directory is resolved to its real file first, then counted
+    once (dedup by realpath): snapshot entries are symlinks into the blob store, and the
+    Xet cache layout keeps the real blobs OUTSIDE the model directory (hub/blobs/<2-char
+    prefix>/), so walking the model dir alone reads 0 GB for a fully downloaded model.
+    Dedup is also what keeps symlink-following from double-counting — the failure mode
+    of `du -L`, which reports ~2x. Dangling links (interrupted downloads) stat-fail and
+    are skipped. Settings shows this number.
+    """
+    root = model_cache_dir(repo)
+    seen: set[str] = set()
+    total = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            path = os.path.join(dirpath, name)
+            try:
+                real = os.path.realpath(path)
+                if real in seen:
+                    continue
+                size = os.stat(path).st_size   # follows symlinks; dangling -> OSError
+            except OSError:
+                continue
+            seen.add(real)
+            total += size
+    return total
+
+
+def download_block_reason(repo: str = "Mapika/decider-2b") -> str | None:
+    """Why the local model must not be (down)loaded right now, or None when allowed.
+
+    JUDGE_BACKEND is the user's choice from the first-run dialog: `local` opts into the
+    download explicitly, `cloud` rules the local model out entirely, `skip` postponed the
+    choice, and unset/auto keeps the historical behaviour for machines that already have
+    the model while refusing to start a surprise download for the rest (#38).
+    """
+    pref = userconfig.get("JUDGE_BACKEND").strip().lower()
+    if pref == "local":
+        return None                      # explicit opt-in: download is the point
+    if pref == "cloud":
+        return ("已选择在线判断（JUDGE_BACKEND=cloud），本地模型未使用 · "
+                "如需离线判断，可在模型设置的「判断 · Jev」页启用")
+    if model_cached(repo):
+        return None                      # auto/skip: keep the historical behaviour
+    return ("离线判断模型尚未下载（约 7 GB）· 可配置 TYPESAFE_API_KEY 走云端判断，"
+            "或在模型设置的「判断 · Jev」页启用离线模型")
 
 
 # decider-2b at fp16 is ~4.4 GB of weights, and the load path peaks well above that
@@ -141,6 +242,12 @@ class Judge:
             reason = low_memory_reason()
             if reason:
                 raise LowMemoryError(reason)
+            # Refuse before silently downloading ~7 GB (#38): the first-run dialog or the
+            # settings window is where that decision belongs. Same placement — the check
+            # must happen BEFORE from_pretrained, which is what downloads.
+            reason = download_block_reason(self.repo)
+            if reason:
+                raise ModelNotDownloadedError(reason)
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             t = self.torch

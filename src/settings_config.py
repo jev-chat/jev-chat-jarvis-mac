@@ -35,7 +35,9 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
     """Change only edited assignments, preserve other lines, replace atomically at 0600."""
     if read_document(path) != original:
         raise ValueError("配置文件已被其他程序修改，请关闭设置窗口后重新打开。")
-    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS}
+    # JUDGE_BACKEND is the first-run dialog's choice (judge.download_block_reason);
+    # the settings window's offline-model section writes it through the same guarded path.
+    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {"JUDGE_BACKEND"}
     if not changes.keys() <= allowed:
         raise ValueError("不支持的配置项。")
     for value in changes.values():

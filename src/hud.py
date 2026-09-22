@@ -70,7 +70,8 @@ userconfig.load()   # ~/.config/jev-jarvis/env -> os.environ (Finder apps inheri
 from perception import (  # noqa: E402
     frontmost_app_is_wechat, read_conversation, screen_capture_ok,
     request_screen_capture, warm_ocr)
-from judge import LowMemoryError, make_judge  # noqa: E402
+import judge  # noqa: E402  (model_cached / model_disk_usage: the #38 onboarding + settings)
+from judge import LowMemoryError, ModelNotDownloadedError, make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
@@ -1772,12 +1773,12 @@ class HudController(NSObject):
                      f" 把握 {verdict.get('confidence', 0):.0%}"
                      f" 风险 {verdict.get('risk', '?')}{note}")
                 self._push("applyJudgment:", (verdict, newest.sender, prev_text))
-            except LowMemoryError as e:
-                # The guard's refusal text is written for the user (actual GB + the
-                # cloud-fallback hint, see judge.low_memory_reason); the generic
-                # formatting below truncates at 40 chars and would cut the
+            except (LowMemoryError, ModelNotDownloadedError) as e:
+                # Both guards refuse with text written for the user (actual GB / the two
+                # ways out, see judge.low_memory_reason and judge.download_block_reason);
+                # the generic formatting below truncates at 40 chars and would cut the
                 # "TYPESAFE_API_KEY" line in half — README promises the hint.
-                _log(f"判断被内存守卫拒绝: {str(e)[:60]}")
+                _log(f"判断被拒 {type(e).__name__}: {str(e)[:60]}")
                 self._push("applyError:", str(e))
             except Exception as e:
                 _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
@@ -2135,8 +2136,20 @@ class HudController(NSObject):
         local_judge = not userconfig.get("TYPESAFE_API_KEY")
         if local_judge:
             self._push("applyStatus:", WARM_STATUS)
+        if (local_judge
+                and userconfig.get("JUDGE_BACKEND").strip().lower() == "cloud"):
+            # #38: the user picked the cloud judge but has no key yet — nothing to warm
+            # on either side, and warming would just raise ModelNotDownloadedError at a
+            # user who did nothing wrong. The first message shows the same hint.
+            self._push("applyStatus:", "已选择在线判断 · 配置 TYPESAFE_API_KEY 后生效")
+            return
         try:
             self.judge.warm()
+        except (LowMemoryError, ModelNotDownloadedError) as e:
+            # Refusal text is written for the user; show it verbatim like applyError does.
+            _log(f"预热判断模型被拒 {type(e).__name__}: {str(e)[:60]}")
+            if local_judge:
+                self._push("applyWarmFailed:", str(e))
         except Exception as e:
             _log(f"预热判断模型失败 {type(e).__name__}: {str(e)[:60]}")
             if local_judge:
@@ -2147,6 +2160,85 @@ class HudController(NSObject):
             _log(f"预热 判断模型就绪 · 总耗时 {(time.perf_counter() - t0) * 1000:.0f}ms")
             if local_judge:
                 self._push("applyWarmDone:", None)
+
+    # ------------------------------------------------- first-run choice (#38)
+    @objc.python_method
+    def _onboarding_needed(self) -> bool:
+        """The #38 dialog fires exactly once: no key, nothing cached, no recorded choice."""
+        return (not userconfig.get("TYPESAFE_API_KEY")
+                and not judge.model_cached()
+                and not userconfig.get("JUDGE_BACKEND"))
+
+    def maybeOnboard_(self, sender):
+        """Ask once how to judge: cloud key, offline model, or later.
+
+        Runs on the main thread before the warm-up thread starts (see main()), so the
+        choice is already in os.environ when _warm reads it — userconfig.get prefers the
+        real environment, which is how the pick takes effect without a restart.
+        """
+        if not self._onboarding_needed():
+            return
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("选择判断方式")
+        alert.setInformativeText_(
+            "未配置判断层 key。判断每条消息的意图与风险，可以用云端 key"
+            "（轻量、无下载），也可以下载离线模型（约 7 GB，之后完全离线）。")
+        accessory = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, 84))
+        choices = (("cloud", "配置 key 在线判断（推荐）", "轻量、无下载，需要 TypeSafe key"),
+                   ("local", "下载离线模型", "约 7 GB 磁盘，下载后完全离线可用"))
+        radios = []
+        y = 58
+        for _value, title, detail in choices:
+            radio = AppKit.NSButton.alloc().initWithFrame_(NSMakeRect(4, y, 348, 20))
+            radio.setButtonType_(AppKit.NSRadioButton)
+            radio.setTitle_(title)
+            radio.setFont_(AppKit.NSFont.systemFontOfSize_(13))
+            accessory.addSubview_(radio)
+            radios.append(radio)
+            note = ui_style.make_label(detail, 24, y - 15, 320, 14, 11,
+                                       AppKit.NSColor.secondaryLabelColor())
+            accessory.addSubview_(note)
+            y -= 38
+        radios[0].setState_(AppKit.NSControlStateValueOn)
+        alert.setAccessoryView_(accessory)
+        alert.addButtonWithTitle_("确定")
+        alert.addButtonWithTitle_("稍后再说")
+        alert.addButtonWithTitle_("打开模型设置…")
+        choice = alert.runModal()
+        if choice == AppKit.NSAlertFirstButtonReturn:
+            picked = next((v for (v, _t, _d), r in zip(choices, radios)
+                           if r.state() == AppKit.NSControlStateValueOn), "skip")
+        elif choice == AppKit.NSAlertSecondButtonReturn:
+            picked = "skip"           # Esc lands here too: postpone, no side effects
+        else:
+            picked = next((v for (v, _t, _d), r in zip(choices, radios)
+                           if r.state() == AppKit.NSControlStateValueOn), "skip")
+        self._record_onboarding(picked)
+        if picked == "local":
+            # Start the download now — rerunning _warm is cheap: the OCR half was already
+            # paid at launch, and the judge half reads the choice from os.environ.
+            threading.Thread(target=self._warm, daemon=True).start()
+        elif choice == AppKit.NSAlertThirdButtonReturn:
+            self.openSettings_(None)
+
+    @objc.python_method
+    def _record_onboarding(self, value: str) -> None:
+        """Persist the choice: env file for future launches, session override for now.
+
+        A plain os.environ write does not work here: userconfig froze its snapshot of
+        the environment at import time. session_override sits in front of every source
+        until the process exits, so the warm-up below sees the pick on this launch.
+        """
+        userconfig.session_override("JUDGE_BACKEND", value)
+        try:
+            import settings_config
+            path = userconfig.env_files()[0]
+            original = settings_config.read_document(path)
+            settings_config.write_settings(path, original, {"JUDGE_BACKEND": value})
+        except (ValueError, OSError) as e:
+            # The session still honours the pick; a failed write just means the dialog
+            # asks again next launch.
+            _log(f"首次引导写入 env 失败 {type(e).__name__}: {str(e)[:60]}")
 
 
 def warn_if_no_generation_key() -> None:
@@ -2202,6 +2294,9 @@ def main() -> None:
          + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))
     controller._show()
+    # #38: ask a brand-new user how to judge BEFORE warming — the choice lands in
+    # os.environ (and the env file), so the warm-up below honours it on this launch.
+    controller.maybeOnboard_(None)
     # Warm the heavy one-off loads (Vision OCR, judge model) while the panel is idle, so
     # the user's first message pays only steady-state costs. With TypeSafe Jev configured
     # warm() is a no-op — the network path has nothing to load.
