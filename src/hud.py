@@ -190,10 +190,17 @@ class _BoxesView(NSView):
     """
 
     def drawRect_(self, rect):
-        for r, color, lw, chip in getattr(self, "boxes", None) or []:
+        for box in getattr(self, "boxes", None) or []:
+            r, color, lw, chip = box[:4]
             color.set()
             NSBezierPath.setDefaultLineWidth_(lw)
-            NSBezierPath.strokeRect_(r)
+            if len(box) > 4 and box[4]:
+                path = NSBezierPath.bezierPathWithRect_(r)
+                path.setLineWidth_(lw)
+                path.setLineDash_count_phase_([6.0, 4.0], 2, 0)
+                path.stroke()
+            else:
+                NSBezierPath.strokeRect_(r)
             chip.drawAtPoint_((r.origin.x, r.origin.y + r.size.height + 2))
 
 
@@ -723,9 +730,13 @@ class HudController(NSObject):
         if not fill.has_accessibility():
             # First click is the moment to ask: the system dialog is the only way in.
             fill.request_accessibility()
-        ok, reason = fill.fill_text(text)
+        target = getattr(self, "_input_target", None)
+        if target is None or (target["box"] is None and not target.get("visual_rect")):
+            self._render("status", "填入失败：" + (target["reason"] if target else "等待输入框定位"), PALETTE["red"])
+            return
+        ok, reason = fill.fill_text(text, target=target)
         if ok:
-            self._render("status", "已填入", PALETTE["green"])
+            self._render("status", reason, PALETTE["green"])
         else:
             self._render("status", f"填入失败：{reason}", PALETTE["red"])
 
@@ -1006,6 +1017,7 @@ class HudController(NSObject):
         # position immediately: analysis takes seconds, and a delayed correction
         # showed up as a visible jump after the verdict landed. Pushed on unchanged
         # frames too — the window can move while its pixels stay identical.
+        live_window = res["window"]
         self._win_wid = res["window"]["wid"]
         self._push("applyPosition:", res["window"])
         if res["unchanged"] and self._last_full is not None:
@@ -1016,6 +1028,20 @@ class HudController(NSObject):
             self._last_full = res
             self._push("applyChat:", res.get("chat_title") or "")
 
+        res = dict(res, window=live_window)
+        # AX traversal stays on the read worker, never the Cocoa drawing thread.
+        now_input = time.monotonic()
+        if (res["window"] != getattr(self, "_input_window", None)
+                or now_input >= getattr(self, "_input_next", 0)):
+            self._input_target = fill.locate_input(res["window"])
+            if self._input_target["box"] is None:
+                from input_region import locate_visual_input
+                self._input_target["visual_rect"] = locate_visual_input(res["window"])
+                if self._input_target["visual_rect"]:
+                    from visual_fill import chat_signature
+                    self._input_target["chat_signature"] = chat_signature(res["window"], self._input_target["visual_rect"])
+            self._input_window = dict(res["window"])
+            self._input_next = now_input + 1.0
         msgs = res["messages"]
         thems = [m for m in msgs if m.side == "them"]
         newest = thems[-1] if thems else None
@@ -1590,6 +1616,25 @@ class HudController(NSObject):
                  NSBackgroundColorAttributeName: color.colorWithAlphaComponent_(0.85)})
             y = H - (m.y + m.h) * H     # normalized top-origin -> view bottom-origin
             boxes.append((NSMakeRect(m.x * W, y, m.w * W, m.h * H), color, lw, chip))
+        target = getattr(self, "_input_target", None)
+        if target and target["window"] == win and target["rect"]:
+            x, y, w, h = target["rect"]
+            color = _rgb(0x2478DD)
+            rect = NSMakeRect(x-win["x"], H-(y-win["y"])-h, w, h)
+            label = target["reason"]
+        elif target and target["window"] == win and target.get("visual_rect"):
+            x, y, w, h = target["visual_rect"]
+            color = PALETTE["amber"]
+            rect = NSMakeRect(x-win["x"], H-(y-win["y"])-h, w, h)
+            label = "虚线：视觉输入区 · 点击填入后校验（不发送）"
+        else:
+            color = PALETTE["amber"]
+            rect = NSMakeRect(12, 12, 0, 0)
+            label = "输入框：" + (target["reason"] if target else "定位中…")
+        chip = NSAttributedString.alloc().initWithString_attributes_(label, {
+            NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.whiteColor(),
+            NSBackgroundColorAttributeName: color.colorWithAlphaComponent_(0.85)})
+        boxes.append((rect, color, 2.0, chip, bool(target and target.get("visual_rect") and not target["rect"])))
         view = self._ov_panel.contentView()
         view.boxes = boxes
         view.setNeedsDisplay_(True)

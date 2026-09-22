@@ -1,6 +1,10 @@
-"""One-click 「填入」: put a candidate reply straight into WeChat's input box.
+"""One-click 「填入」: put a candidate reply into WeChat's input box.
 
-Mechanism — the Accessibility API, not synthetic keystrokes:
+The AX path below remains preferred. When WeChat exposes no input control, an
+explicit Fill click can use visual_fill's checked keyboard fallback. It does not
+use the clipboard or Return; uncertain readback is reported, never retried.
+
+Preferred mechanism — the Accessibility API:
     find WeChat's input box in the accessibility tree (the AXTextArea inside the window
     titled 微信), write the text into it, then read it back and only report success if the
     text is verifiably there.
@@ -58,7 +62,7 @@ MAX_NODES = 2000
 REASON_EMPTY = "没有可填入的内容"
 REASON_NO_ACCESS = "未授予辅助功能权限"
 REASON_NO_WECHAT = "没找到微信应用"
-REASON_NO_INPUT = "没找到微信输入框（微信改版了？）"
+REASON_NO_INPUT = "未取得可用的微信输入控件"
 REASON_WRITE_FAILED = "写入输入框失败"
 REASON_NOT_VERIFIED = "写入后没读到内容，可能没填进去"
 REASON_BUSY = "上一次填入还没结束"
@@ -127,7 +131,53 @@ def _ax_size(element) -> tuple[float, float] | None:
         return None
 
 
-def _find_input_box(pid: int):
+def _ax_rect(element):
+    size = _ax_size(element)
+    raw = _ax_attr(element, ApplicationServices.kAXPositionAttribute)
+    if not size or raw is None:
+        return None
+    try:
+        ok, point = ApplicationServices.AXValueGetValue(
+            raw, ApplicationServices.kAXValueCGPointType, None)
+        return (float(point.x), float(point.y), *size) if ok else None
+    except Exception:
+        return None
+
+
+def _same_rect(a, b):
+    return a is not None and b is not None and all(abs(x-y) <= 3 for x, y in zip(a, b))
+
+
+def locate_input(win):
+    """Read-only target shared by the overlay and Fill; never request permission here."""
+    result = {"box": None, "rect": None, "window": win, "reason": REASON_NO_INPUT}
+    if not has_accessibility():
+        result["reason"] = REASON_NO_ACCESS
+        return result
+    app = _wechat_app()
+    if app is None:
+        result["reason"] = REASON_NO_WECHAT
+        return result
+    bounds = tuple(win[k] for k in ("x", "y", "w", "h"))
+    box = _find_input_box(app.processIdentifier(), bounds)
+    if box is None:
+        return result
+    rect = _ax_rect(box)
+    if rect is None:
+        result["reason"] = "输入控件坐标不可读取"
+        return result
+    x, y, w, h = rect
+    wx, wy, ww, wh = bounds
+    if not (wx <= x and wy <= y and x+w <= wx+ww+3 and y+h <= wy+wh+3):
+        result["reason"] = "输入控件不在当前微信窗口内"
+        return result
+    result.update(box=box, rect=rect, reason="填入目标")
+    if _ax_value(box) is None:
+        result["reason"] = "输入控件已定位，文字不可读取"
+    return result
+
+
+def _find_input_box(pid: int, window_rect=None):
     """WeChat's message input box, or None.
 
     Returns the LARGEST text area in the chat window, not the first one found: WeChat's
@@ -151,6 +201,8 @@ def _find_input_box(pid: int):
 
     best, best_area = None, 0.0
     for window in ordered:
+        if window_rect is not None and not _same_rect(_ax_rect(window), window_rect):
+            continue
         queue, seen = [window], 0
         while queue and seen < MAX_NODES:
             el = queue.pop(0)
@@ -212,7 +264,7 @@ def _duplicate_blocked(text: str, current: str,
             and (now - last_ts) < DUPLICATE_WINDOW_S)
 
 
-def fill_text(text: str) -> tuple[bool, str]:
+def fill_text(text: str, target=None) -> tuple[bool, str]:
     """Write `text` into WeChat's input box, appended to whatever is already typed there.
 
     Returns (ok, reason). Appending keeps this equivalent to the paste it replaces: a paste
@@ -234,7 +286,20 @@ def fill_text(text: str) -> tuple[bool, str]:
         if app is None:
             return False, REASON_NO_WECHAT
 
-        box = _find_input_box(app.processIdentifier())
+        if target is not None and target['box'] is None and target.get('visual_rect'):
+            from visual_fill import write_text
+            try:
+                return write_text(text, target, app)
+            except Exception:
+                return False, '输入过程异常，请先检查草稿，勿重复点击'
+        if target is not None:
+            fresh = locate_input(target["window"])
+            box = fresh["box"]
+            if (box is None or target["box"] is None or box != target["box"]
+                    or not _same_rect(fresh["rect"], target["rect"])):
+                return False, "输入目标已变化，请等检测框更新后重试"
+        else:
+            box = _find_input_box(app.processIdentifier())
         if box is None:
             return False, REASON_NO_INPUT
 
