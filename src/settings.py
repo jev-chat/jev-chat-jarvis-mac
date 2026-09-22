@@ -12,6 +12,10 @@ from Foundation import NSObject, NSMakeRect
 import builtin
 import userconfig
 import settings_config as config
+import ui_style
+
+
+PALETTE = ui_style.PALETTE
 
 
 class SettingsController(NSObject):
@@ -31,47 +35,69 @@ class SettingsController(NSObject):
             A.NSBackingStoreBuffered, False)
         self.window.setAppearance_(A.NSAppearance.appearanceNamed_(A.NSAppearanceNameAqua))
         self.window.setTitle_("模型设置 · 保存后重启生效")
+        self.window.setOpaque_(False)
+        self.window.setBackgroundColor_(A.NSColor.clearColor())
+        self.window.setHasShadow_(True)
         # The HUD and OCR overlay float above normal windows; settings must sit above both.
         self.window.setLevel_(A.NSFloatingWindowLevel + 1)
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
-        view = self.window.contentView()
-        self.label(view, "模型设置", 24, 548, 710, 30, 22)
-        restart_box = A.NSBox.alloc().initWithFrame_(NSMakeRect(24, 512, 710, 32))
-        restart_box.setBoxType_(A.NSBoxCustom)
-        restart_box.setBorderType_(A.NSNoBorder)
-        restart_box.setCornerRadius_(5)
-        restart_box.setFillColor_(A.NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 0.94, 0.82, 1))
+        view = A.NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 760, 600))
+        view.setMaterial_(getattr(
+            A, "NSVisualEffectMaterialSidebar",
+            getattr(A, "NSVisualEffectMaterialLight", 1)))
+        view.setBlendingMode_(A.NSVisualEffectBlendingModeBehindWindow)
+        view.setState_(A.NSVisualEffectStateActive)
+        view.setWantsLayer_(True)
+        view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
+        self.window.setContentView_(view)
+
+        title = self.label(view, "模型设置", 24, 550, 710, 28, 22)
+        title.setFont_(A.NSFont.boldSystemFontOfSize_(22))
+        title.setTextColor_(PALETTE["text"])
+        self.label(view, "编辑文件：" + str(self.path).replace(str(Path.home()), "~"),
+                   24, 522, 710, 20, 11, PALETTE["muted"])
+
+        restart_box = ui_style.make_surface(
+            10, PALETTE["amber"].colorWithAlphaComponent_(0.10),
+            PALETTE["amber"].colorWithAlphaComponent_(0.18))
+        restart_box.setFrame_(NSMakeRect(24, 482, 710, 34))
         view.addSubview_(restart_box)
         restart_notice = self.label(view, "保存后请退出应用并重启",
-                                    36, 515.5, 686, 22, 15)
-        restart_notice.setFont_(A.NSFont.boldSystemFontOfSize_(15))
-        restart_notice.setTextColor_(A.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.55, 0.25, 0.02, 1))
-        self.label(view, "编辑文件：" + str(self.path).replace(str(Path.home()), "~"),
-                   24, 476, 710, 34, 12)
-        self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(16, 130, 728, 342))
+                                    38, 488, 680, 20, 13, PALETTE["amber"])
+        restart_notice.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+
+        tab_surface = ui_style.make_surface(14, PALETTE["surface"], PALETTE["edge"])
+        tab_surface.setFrame_(NSMakeRect(16, 128, 728, 342))
+        view.addSubview_(tab_surface)
+        self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(24, 136, 712, 326))
+        if hasattr(self.tabs, "setDrawsBackground_"):
+            self.tabs.setDrawsBackground_(False)
         titles = ("判断 · Jev", "生成 · OpenAI 兼容", "生成 · Anthropic 兼容")
         for index, (prefix, title) in enumerate(zip(config.PREFIXES, titles)):
             item = A.NSTabViewItem.alloc().initWithIdentifier_(prefix)
             item.setLabel_(title)
             panel = A.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 690, 300))
             summary, source = self.current_source(prefix)
-            badge = self.label(panel, summary, 14, 260, 666, 26, 14)
+            source_surface = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
+            source_surface.setFrame_(NSMakeRect(12, 212, 666, 76))
+            panel.addSubview_(source_surface)
+            badge = self.label(panel, summary, 26, 254, 638, 20, 14, PALETTE["green"])
             badge.setFont_(A.NSFont.boldSystemFontOfSize_(14))
-            badge.setTextColor_(A.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.10, 0.32, 0.70, 1))
-            self.label(panel, source, 14, 206, 666, 48, 12)
+            self.label(panel, source, 26, 220, 638, 34, 11, PALETTE["muted"])
             fields = {}
-            for name, label, y in (("API_KEY", "密钥", 172), ("BASE_URL", "服务地址", 128), ("MODEL", "模型", 84)):
-                self.label(panel, label, 14, y, 88, 26)
+            for name, label, y in (("API_KEY", "密钥", 166), ("BASE_URL", "服务地址", 120), ("MODEL", "模型", 74)):
+                row_label = self.label(panel, label, 26, y + 3, 78, 24, 11, PALETTE["text"])
+                row_label.setFont_(A.NSFont.boldSystemFontOfSize_(11))
                 cls = A.NSSecureTextField if name == "API_KEY" else A.NSComboBox if name == "MODEL" else A.NSTextField
-                field = cls.alloc().initWithFrame_(NSMakeRect(104, y, 574, 26))
+                field = cls.alloc().initWithFrame_(NSMakeRect(112, y, 552, 30))
                 default = "" if name == "API_KEY" else config.DEFAULTS[prefix][name == "MODEL"]
                 value = values.get(f"{prefix}_{name}", default)
                 if name == "API_KEY" and ("$(" in value or "`" in value):
                     value = ""  # Do not evaluate or rewrite shell/keychain expressions.
                     field.setToolTip_("此密钥由 shell 表达式提供；留空保留原行，输入新密钥才会替换。")
                 field.setStringValue_(value)
-                field.setFont_(A.NSFont.systemFontOfSize_(13))
+                self.style_field(field)
                 field.setDelegate_(self)
                 field.setAccessibilityLabel_(title + " " + label)
                 if name == "API_KEY":
@@ -90,30 +116,33 @@ class SettingsController(NSObject):
             hint = ("Jev 地址不含 /v1；列表接口不可用时，可手填模型。" if prefix == "TYPESAFE"
                     else "可手填模型。Ollama 地址通常含 /v1，密钥可填 ollama。" if prefix == "OPENAI"
                     else "使用 Anthropic 消息接口，支持自定义兼容服务地址。")
-            self.label(panel, hint, 14, 46, 666, 24, 12)
-            for text, action, x in (("获取模型列表", "fetchModels:", 370), ("测试连接", "testConnection:", 532)):
-                button = self.button(panel, text, action, x, 4, 150)
+            self.label(panel, hint, 26, 43, 638, 20, 11, PALETTE["muted"])
+            for text, action, x in (("获取模型列表", "fetchModels:", 372), ("测试连接", "testConnection:", 524)):
+                button = self.button(panel, text, action, x, 4, 140)
                 button.setTag_(index)
                 self.controls.append(button)
             item.setView_(panel)
             self.tabs.addTabViewItem_(item)
         view.addSubview_(self.tabs)
-        self.label(view, "优先级：环境变量 > 用户 env > 项目 .env > 内置；两组生成密钥同时存在时 OpenAI 优先。\n清空此文件的密钥不屏蔽其他来源；切换服务需清除原来源中的优先密钥。", 24, 82, 710, 44, 12)
-        self.status = self.label(view, "测试会发送固定问候语，不读取微信内容；可能产生少量服务费用。", 24, 36, 535, 42, 12)
+        priority_surface = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
+        priority_surface.setFrame_(NSMakeRect(24, 74, 710, 44))
+        view.addSubview_(priority_surface)
+        self.label(view, "优先级：环境变量 > 用户 env > 项目 .env > 内置；两组生成密钥同时存在时 OpenAI 优先。\n清空此文件的密钥不屏蔽其他来源；切换服务需清除原来源中的优先密钥。", 36, 80, 686, 32, 11, PALETTE["muted"])
+        self.status = self.label(view, "测试会发送固定问候语，不读取微信内容；可能产生少量服务费用。", 24, 26, 550, 38, 11, PALETTE["muted"])
         self.set_status(self.status.stringValue())
-        self.save_button = self.button(view, "保存配置", "saveSettings:", 602, 38, 134)
+        self.save_button = self.button(view, "保存配置", "saveSettings:", 602, 29, 132, True)
         self.controls.append(self.save_button)
         self.window.center()
         return self
 
     @objc.python_method
     def set_status(self, text, kind="info"):
-        colors = {"info": A.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.10, 0.32, 0.70, 1),
-                  "success": A.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 0.40, 0.20, 1),
-                  "error": A.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.75, 0.12, 0.12, 1)}
+        colors = {"info": PALETTE["muted"],
+                  "success": PALETTE["green"],
+                  "error": PALETTE["red"]}
         self.status.setStringValue_(text)
         self.status.setTextColor_(colors[kind])
-        self.status.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.status.setFont_(A.NSFont.boldSystemFontOfSize_(11))
 
     @objc.python_method
     def set_models(self, combo, models):
@@ -157,18 +186,27 @@ class SettingsController(NSObject):
         return summary, detail
 
     @objc.python_method
-    def label(self, view, text, x, y, w, h, size=13):
-        field = A.NSTextField.wrappingLabelWithString_(text)
-        field.setFrame_(NSMakeRect(x, y, w, h))
-        field.setFont_(A.NSFont.systemFontOfSize_(size))
+    def label(self, view, text, x, y, w, h, size=13, color=None):
+        field = ui_style.make_label(text, x, y, w, h, size, color)
+        field.cell().setWraps_(True)
         view.addSubview_(field)
         return field
 
     @objc.python_method
-    def button(self, view, title, action, x, y, width):
+    def style_field(self, field):
+        field.setFont_(A.NSFont.systemFontOfSize_(12))
+        field.setTextColor_(PALETTE["text"])
+        field.setBackgroundColor_(PALETTE["field"])
+        field.setWantsLayer_(True)
+        field.layer().setBorderColor_(PALETTE["edge"].CGColor())
+        field.layer().setBorderWidth_(0.75)
+        field.layer().setCornerRadius_(ui_style.RADIUS_FIELD)
+
+    @objc.python_method
+    def button(self, view, title, action, x, y, width, primary=False):
         button = A.NSButton.alloc().initWithFrame_(NSMakeRect(x, y, width, 32))
         button.setTitle_(title)
-        button.setBezelStyle_(A.NSBezelStyleRounded)
+        ui_style.style_button(button, font_size=11, radius=16, primary=primary)
         button.setTarget_(self)
         button.setAction_(action)
         view.addSubview_(button)

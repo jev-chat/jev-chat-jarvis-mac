@@ -73,6 +73,7 @@ from judge import make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
+import ui_style  # noqa: E402
 
 PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
 COLLAPSED_H = 96              # height when the panel is rolled up
@@ -94,34 +95,9 @@ CONTEXT_TURNS = 4        # recent turns the generation half sees
 JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, faster forward
 
 
-# ---------------------------------------------------------------- palette
-# Native light vibrancy with cool ink, quiet metadata and semantic risk colours. Alpha is
-# intentional: NSVisualEffectView supplies the material, these tints only establish depth.
-
-
-def _rgb(hex_code: int, alpha: float = 1.0) -> NSColor:
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(
-        ((hex_code >> 16) & 0xFF) / 255.0,
-        ((hex_code >> 8) & 0xFF) / 255.0,
-        (hex_code & 0xFF) / 255.0,
-        alpha,
-    )
-
-
-PALETTE = {
-    "bg": _rgb(0xF5F9F8, 0.74),
-    "text": _rgb(0x102142),    # deep blue ink from the approved reference
-    "muted": _rgb(0x6F7D94),   # cool metadata with enough contrast on vibrancy
-    "accent": _rgb(0x0B8A4A),  # darker emerald for prominent text
-    "green": _rgb(0x00B95F),   # vivid status / risk / probability colour
-    "amber": _rgb(0xF0A000),   # risk 留神
-    "red": _rgb(0xF05252),     # risk 危险, failures
-    "surface": _rgb(0xFFFFFF, 0.36),
-    "row": _rgb(0xFFFFFF, 0.24),
-    "field": _rgb(0xFFFFFF, 0.42),
-    "edge": _rgb(0xFFFFFF, 0.72),
-    "track": _rgb(0xB8C1C6, 0.42),
-}
+# Shared with the settings window so both surfaces keep one visual vocabulary.
+PALETTE = ui_style.PALETTE
+_rgb = ui_style.rgb
 
 # Compact reply rows: probability rail, fully wrapped reply, then the two existing actions.
 # Only the minimum is fixed. _relayout() measures each candidate and grows the row as needed.
@@ -320,11 +296,16 @@ class HudController(NSObject):
 
         # The latest master adds model settings to this same header. Keep it as a quiet,
         # standalone icon so the new control does not collide with the chat title.
-        self.settings_button = self._make_button(PANEL_W - 38, 0, 24, 24,
+        self.settings_button = self._make_button(PANEL_W - 44, 0, 32, 32,
                                                  "", "openSettings:", 0)
-        self.settings_button.setImage_(AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "gearshape", "模型设置"))
+        settings_icon = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "gearshape", "模型设置")
+        symbol_config = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+            12, AppKit.NSFontWeightRegular)
+        settings_icon = settings_icon.imageWithSymbolConfiguration_(symbol_config)
+        self.settings_button.setImage_(settings_icon)
         self.settings_button.setImagePosition_(AppKit.NSImageOnly)
+        self.settings_button.setImageScaling_(AppKit.NSImageScaleNone)
         self.settings_button.setBordered_(False)
         self.settings_button.setContentTintColor_(PALETTE["muted"])
         self.settings_button.layer().setBackgroundColor_(NSColor.clearColor().CGColor())
@@ -333,7 +314,7 @@ class HudController(NSObject):
         self.settings_button.setAccessibilityLabel_("模型设置")
         self.settings_button.setHidden_(False)
         view.addSubview_(self.settings_button)
-        self._fixed.append((self.settings_button, PANEL_W - 38, 10, 24, 24))
+        self._fixed.append((self.settings_button, PANEL_W - 44, 4, 32, 32))
 
         # Decorative surfaces are fixed; every string still comes from the existing rows.
         for surface, x, top, w, h in (
@@ -644,41 +625,18 @@ class HudController(NSObject):
     @objc.python_method
     def _make_surface(self, radius: float, color: NSColor,
                       border: NSColor | None = None) -> NSView:
-        """Layer-backed visual surface; it never owns or transforms application data."""
-        surface = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 1, 1))
-        surface.setWantsLayer_(True)
-        surface.layer().setBackgroundColor_(color.CGColor())
-        surface.layer().setCornerRadius_(radius)
-        if border is not None:
-            surface.layer().setBorderColor_(border.CGColor())
-            surface.layer().setBorderWidth_(0.75)
-        return surface
+        return ui_style.make_surface(radius, color, border)
 
     @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
-        tf = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
-        tf.setStringValue_("")
-        tf.setBezeled_(False)
-        tf.setDrawsBackground_(False)
-        tf.setEditable_(False)
-        tf.setSelectable_(True)
-        tf.setTextColor_(PALETTE["text"] if color is None else color)
-        tf.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
-        return tf
+        return ui_style.make_label("", x, y, w, h, size, color, bold, selectable=True)
 
     @objc.python_method
     def _make_button(self, x, y, w, h, title, action, tag):
         """Compact native action with a light outline over the vibrancy material."""
         btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
         btn.setTitle_(title)
-        btn.setBordered_(False)
-        btn.setFont_(NSFont.systemFontOfSize_(10))
-        btn.setContentTintColor_(PALETTE["text"])
-        btn.setWantsLayer_(True)
-        btn.layer().setBackgroundColor_(PALETTE["row"].CGColor())
-        btn.layer().setBorderColor_(PALETTE["edge"].CGColor())
-        btn.layer().setBorderWidth_(0.75)
-        btn.layer().setCornerRadius_(CAND_BTN_H / 2)
+        ui_style.style_button(btn, font_size=10, radius=CAND_BTN_H / 2)
         btn.setTarget_(self)
         btn.setAction_(action)
         btn.setTag_(tag)
