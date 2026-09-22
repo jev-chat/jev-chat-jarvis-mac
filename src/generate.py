@@ -187,6 +187,61 @@ def _strip_quotes(s: str) -> str:
     return _QUOTES.sub("", s)
 
 
+_VERSION_SEG = re.compile(r"v\d+[a-z]*")
+
+
+def _base_segments(base: str) -> list[str]:
+    """Path segments of a base URL, empty pieces stripped (`…/v1/` -> ['v1'])."""
+    return [s for s in urllib.parse.urlsplit((base or "").rstrip("/")).path.split("/")
+            if s]
+
+
+def base_has_version_segment(base: str) -> bool:
+    """True when the base URL already ends in a version segment (`…/v1`, `…/v4`).
+
+    Providers disagree about whether the version belongs to the base, so both spellings
+    must compose to the same request URL. Shared with judge_jev (#42), which appends its
+    own action path by the same rule — a user who copies a working generation-layer
+    base into TYPESAFE_BASE_URL must not suddenly get `/v1/v1/…`.
+    """
+    segs = _base_segments(base)
+    return bool(segs) and bool(_VERSION_SEG.fullmatch(segs[-1].lower()))
+
+
+def base_is_verbatim_action(base: str) -> bool:
+    """True when base already ends in version+action (`…/v1/evaluate`): use it as-is.
+
+    Gateways do not even agree on the action name — Vercel AI Gateway exposes TypeSafe
+    under `/v1/evaluate`, not `/v1/systemone` (#42) — so a base ending in
+    `<version>/<segment>` is taken as a complete request URL. A plain prefix like
+    `…/api` does NOT match (the segment before last is not a version), keeping the
+    pre-existing `…/api/v1/systemone` behaviour for gateway path prefixes.
+
+    Known edge: a gateway that hangs a NAMESPACE prefix under its version segment
+    (`…/v1/typesafe`) also matches and is used verbatim — the rule cannot tell an
+    action segment from a prefix segment. Always fill the base up to the action path;
+    do not expect `/systemone` to be appended after an arbitrary prefix.
+    """
+    segs = _base_segments(base)
+    return (len(segs) >= 2
+            and bool(_VERSION_SEG.fullmatch(segs[-2].lower())))
+
+
+def jev_request_url(base: str) -> str:
+    """The request URL for a TypeSafe-compatible endpoint — the ONE #42 composition rule.
+
+    Host-only bases get `/v1/systemone`; version-suffixed bases get only the action
+    (`…/v1` -> `…/v1/systemone`, never `/v1/v1/…`); version+action bases are already
+    complete (Vercel serves `/v1/evaluate`). Shared by `JevJudge._post` and the
+    settings window's 测试连接 — a third spelling of this rule is how `/v1/v1/…`
+    comes back.
+    """
+    b = (base or "").rstrip("/")
+    if base_is_verbatim_action(b):
+        return b
+    return b + ("/systemone" if base_has_version_segment(b) else "/v1/systemone")
+
+
 def _endpoint(base: str, api: str) -> str:
     """Compose the request URL, tolerating both base-URL conventions.
 
@@ -197,8 +252,7 @@ def _endpoint(base: str, api: str) -> str:
     So: if the base already ends in a version segment, append only the path.
     """
     b = (base or "").rstrip("/")
-    last = b.rsplit("/", 1)[-1].lower()
-    has_version = bool(re.fullmatch(r"v\d+[a-z]*", last))
+    has_version = base_has_version_segment(b)
     if api == "anthropic":
         return b + ("/messages" if has_version else "/v1/messages")
     return b + ("/chat/completions" if has_version else "/v1/chat/completions")

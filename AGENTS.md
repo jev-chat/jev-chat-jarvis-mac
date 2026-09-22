@@ -15,12 +15,12 @@
   ```
 
 - 日志：`~/Library/Logs/jev-jarvis.log`，分阶段耗时（读屏/判断/生成/排序/端到端）。**刻意不含消息正文与候选文字**（用户可放心贴 issue），只在事件发生时打、不在每跳打；首次调用标注「首次」。
-- 发版：版本号只有 `pyproject.toml` 一处；`./packaging/release.sh --publish` 从**干净 worktree** 构建（zip 解压回验+SHA256+gh release）；无 Apple 公证，首次打开要教右键。
+- 发版：版本号只有 `pyproject.toml` 一处；`./packaging/release.sh --publish` 从**干净 worktree** 构建（zip 解压回验+SHA256+gh release）；无 Apple 公证，首次打开要教右键。资产命名统一 `jev-jarvis-macos-` 前缀：版本包 `jev-jarvis-macos-v<版本>.zip`、稳定名 `jev-jarvis-macos-latest.zip`（README 下载链接靠它，改名必须三处同步：release.sh + README + 当期 release notes）。
 - 认领协议：动任何 issue 的代码前，先按 [CONTRIBUTING.md](CONTRIBUTING.md) 完成认领三步自检 + 评论认领 + 设 assignee——多人多 AI 并行扫 issue，不认领必撞车。
 
 ## 架构与硬约束
 
-- **纯只读**：不注入、不 hook、不解密微信数据。「填入」是唯一写动作，走辅助功能接口——**别改回剪贴板+模拟 Cmd+V**（切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
+- **纯只读**：不注入、不 hook、不解密微信数据。「填入」是唯一写动作：AX 写入优先；微信不提供 AX 输入控件时（如 4.1 部分环境），显式点击「填入」走 `visual_fill` 视觉兼容路径——点击输入区 + CGEvent 键盘事件，**不发送、不用剪贴板/Cmd+V、不覆盖草稿、窗口/焦点/会话签名三重复核、OCR 读回确认、失败不自动重试**（README「输入区检测框与填入」）——**别改回剪贴板+模拟 Cmd+V**（切前台不可靠、覆盖剪贴板、失败会贴进别的应用，见 `src/fill.py` 顶部注释）。
 - **轮询**：定时器 0.25s 触发，`_next_read_ts` 门控分三档——静止（指纹相同）跳过 OCR、0.25s 一跳；**变化后先 0.45s×3 跳**（burst 下一条尽快被发现），持续再动才回 1s。**未变化帧仍要跑停稳判定**（复用 `_last_full` 缓存），否则分析永远不触发。停稳 `SETTLE_S=1.2` 是防刷屏**上限不能删**；连续 `STABLE_READS` 跳安静最早 `EARLY_SETTLE_S` 可提前开闸。最小分析间隔 `MIN_GAP_S=2.0` 不能删（预判命中路径本就免冷却）。
 - **预判+生成都早跑**（`_prejudge_loop` / `_pregen_loop`，同款 latest-wins 槽位）：消息一出现两个半边同时起跑，停稳门只消费「文本仍是最新」的结果；生成结果还要话术匹配（`_take_pregen`），迟到/过期结果由 `applyCandidates_` 的话术守卫挡掉。候选**先上屏再排序**（prob=None 显示「排序中」，`_rank_payload` 完成后原位重排）。
 - **分析在独立线程**（`_run_analysis` + `_analyzing` 防重入），别塞回 tick 线程——那会重新造成分析期间轮询停摆。

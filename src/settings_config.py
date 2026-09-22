@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 
 import userconfig
-from generate import _endpoint, http_post_json, Generator, ThinkingOnlyError
+from generate import _endpoint, base_is_verbatim_action, http_post_json, jev_request_url, Generator, ThinkingOnlyError
 
 PREFIXES = ("TYPESAFE", "OPENAI", "ANTHROPIC")
 FIELDS = ("API_KEY", "BASE_URL", "MODEL")
@@ -84,6 +84,10 @@ def list_models(prefix: str, base: str, key: str) -> list[str]:
     base = validate_endpoint(base)
     if not key:
         raise ValueError("请先填写密钥；Ollama 可填写 ollama。")
+    if prefix == "TYPESAFE" and base_is_verbatim_action(base):
+        # A complete action path (e.g. Vercel …/v1/evaluate) has no sibling /models we
+        # can derive — appending anything would just 404 on the action itself.
+        raise ValueError("该地址是完整动作路径，模型列表不可用，请手动填写模型名。")
     api = "anthropic" if prefix == "ANTHROPIC" else "openai"
     url = _endpoint(base, api).rsplit("/", 1)[0]
     if api == "openai":
@@ -128,10 +132,11 @@ def test_connection(prefix: str, base: str, key: str, model: str, extra: dict | 
     if not key or not model.strip():
         raise ValueError("请填写密钥和模型后再测试。")
     if prefix == "TYPESAFE":
-        # Same endpoint/transport as JevJudge, without loading the local judge model.
+        # Same endpoint/transport as JevJudge — through the SAME composition rule, so a
+        # base that tests well here cannot 404 at run time (…/v1, Vercel verbatim, …).
         body = {"model": model, "state": "你好", "questions": {
             "test": {"type": "choice", "instructions": "请选择问候", "criteria": {"问候": None}}}}
-        data = http_post_json(base + "/v1/systemone", {
+        data = http_post_json(jev_request_url(base), {
             "content-type": "application/json", "authorization": f"Bearer {key}"}, body, 30)
         if ((data.get("answers") or {}).get("test") or {}).get("choice") != "问候":
             raise ValueError("服务返回了响应，但未返回有效判断结果。")

@@ -8,9 +8,25 @@
 
 ## 交流反馈
 
-用着有问题、想提需求、想一起改，扫码进群（二维码 7 天失效，过期了在 issue 说一声）：
+用着有问题、想提需求、想一起改，扫码进群（**1 群已满，从 2 群开始扫，满了顺序换下一个**）；群二维码 7 天失效，过期了在 issue 说一声：
 
-<img src="docs/wechat-group.png" width="200" alt="扫码加入微信交流群">
+<table>
+  <tr>
+    <td align="center"><img src="docs/wechat-group-2.png" width="200" alt="扫码加入微信交流群 2 群"><br><sub>2 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-3.png" width="200" alt="扫码加入微信交流群 3 群"><br><sub>3 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-4.png" width="200" alt="扫码加入微信交流群 4 群"><br><sub>4 群</sub></td>
+    <td align="center"><img src="docs/wechat-group-5.png" width="200" alt="扫码加入微信交流群 5 群"><br><sub>5 群</sub></td>
+  </tr>
+</table>
+
+都满了或者不想进群，直接找我：加个人微信（备注来意），或关注公众号后台私信：
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
+    <td align="center"><img src="docs/wechat-mp-qr.png" width="200" alt="扫码关注公众号"><br><sub>公众号</sub></td>
+  </tr>
+</table>
 
 ## 它能做什么
 
@@ -19,9 +35,25 @@
 - **快**：消息一出现判断 + 生成同时起跑，M1 Pro 出意图 ~1.5 s、出候选 ~1.5–2 s（端到端为机制推算口径，以日志实测为准）
 - **YOLO 检测框**（可选，`JEV_BOXES=1` 启动即开、菜单栏可切）：OCR 命中的消息实时框在微信窗口上，对方/我分色 + 置信度
 
+## 面板读法
+
+面板使用 macOS 原生浅色磨砂材质：顶部是当前聊天、分析状态、正在处理的消息与上下文；中间依次显示意图、识别率、风险等级和行动建议；底部按话术分组展示候选回复。当前风险圆点会轻微呼吸提示。每条候选左侧是本地排序概率，右侧仍只有「复制」和「填入」；候选行会随完整文字自动增高，不截断内容，发送始终由用户在微信里手动完成。
+
+「不用」的话术槽只保留一行下拉选择，不生成也不占候选行；开启或关闭话术只改变面板高度，不改变判断与轮询流程。黄色窗口按钮收起到聊天名与状态，红色窗口按钮退出。
+
 ## 用法
 
-**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases) 下载 `.app`，解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
+**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases/latest/download/jev-jarvis-macos-latest.zip) 下载 `.app`，解压拖进「应用程序」，**第一次右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）。
+
+![「已损坏，无法打开」的报错弹窗](docs/troubleshoot-damaged.png)
+
+弹窗若显示「**已损坏，无法打开，你应该将它移到废纸篓**」（浏览器下载的 zip 常见，右键打开也绕不过），别删——在终端清掉隔离属性即可：
+
+```bash
+sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
+```
+
+`.app` 若改过名（如「jev-jarvis 2.app」），把命令里的目录名换成实际路径。
 
 首次启动按提示授予「屏幕录制」权限（系统设置 › 隐私与安全性 › 录屏与系统录音，给 **jev-jarvis** 打开），**退出重开**生效；「填入」另需「辅助功能」权限，第一次点会弹系统授权框。v0.3.1 及更早的旧版本还需把 **python3.12** 那条一并打开。
 
@@ -40,7 +72,7 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 
 ## 配置
 
-两层、两个 key、**都可以不填**：判断层不填走本地 decider-2b（首次下载约 7 GB）；生成层打包版内置共享 key，不配也能出候选。全部配置在一个 env 文件（**不提供第二种格式**）：
+两层、两个 key、**都可以不填**：判断层不填走本地 decider-2b（首次下载约 7 GB）；生成层打包版内置共享 key，不配也能出候选，数据流向见 [PRIVACY.md](PRIVACY.md)。全部配置在一个 env 文件（**不提供第二种格式**）：
 
 ### 可视化配置（#18）
 
@@ -52,7 +84,7 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 - 「测试连接」使用窗口内**尚未保存**的地址、密钥和模型发起实际调用，仅发送固定问候语，不读取微信内容；可能产生少量服务费用。生成层必须返回非空文字才算成功，不能用 `--check` 的配置解析成功代替连接成功。
 - 密钥掩码显示；窗口仅读取所编辑文件中的值，不把环境变量、项目 `.env` 或内置共享密钥复制进用户文件。各配置页顶部突出显示本次启动正在使用自己的密钥、内置共享密钥或本地判断，以及实际来源；生成页同时标明当前启用的服务，优先级保留在窗口下方。
 - 环境变量优先于用户 env，用户 env 优先于项目 `.env`；生成层 OpenAI 组优先于 Anthropic 组，均未配置才使用内置共享密钥。清空当前文件的密钥不会禁用其他来源中的密钥。由终端或启动器导出的值也显示为「环境变量」。
-- API 格式由密钥组决定：`OPENAI_*` 使用 OpenAI 格式，`ANTHROPIC_*` 使用 Anthropic 格式；自定义地址不需要包含服务名称。Ollama 可填 `http://localhost:11434/v1`、密钥 `ollama`，模型从本地服务获取或手填。Jev 地址沿用判断层约定，不含末尾 `/v1`。
+- API 格式由密钥组决定：`OPENAI_*` 使用 OpenAI 格式，`ANTHROPIC_*` 使用 Anthropic 格式；自定义地址不需要包含服务名称。Ollama 可填 `http://localhost:11434/v1`、密钥 `ollama`，模型从本地服务获取或手填。Jev 地址带不带末尾 `/v1` 都行，与手动配置共用同一条拼接规则。
 - 钥匙串：不新增钥匙串读写。如果原 env 用 `$(security find-generic-password …)` 等 shell 表达式提供密钥，窗口不执行表达式、不展示其内容，未输入新密钥时保留原行；仍由已有启动器执行。要在窗口测试该服务，需明确输入密钥；保存将用输入值替换原表达式。外部注入的密钥继续遵循环境变量优先级。
 - `JEV_BOXES`、`JEV_TONES`、`OPENAI_EXTRA_BODY` 暂仍通过 env 配置，保存窗口不会改动它们。OpenAI 连接测试沿用当前启动的 `OPENAI_EXTRA_BODY`；完整话术管理等留待后续扩展。
 
@@ -75,6 +107,7 @@ chmod 600 ~/.config/jev-jarvis/env
 ```
 
 - **凭据解析以 key 为准**：提供 key 的来源同时决定端点和模型。实测可用：DeepSeek `deepseek-chat`（最快）；智谱 `glm-4-flash`（换 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`，两组都填 OpenAI 组优先）；本地 Ollama `qwen2.5:7b`（完全不出网）
+- **判断层网关**：`TYPESAFE_BASE_URL` 三种填法等价可用——只到主机（`https://api.typesafe.ai`）、带版本段（`…/v1`，自动补动作段，不会出现 `/v1/v1/…`）、或填完整动作路径（填到动作段为止，原样使用、不再拼接）。第三方 TypeSafe 兼容网关填网关地址 + 网关 key，模型名按网关填写（如 Vercel AI Gateway 填 `https://ai-gateway.vercel.sh/v1/evaluate`、模型 `typesafe-ai/jev`）
 - **别用 thinking 模型**：思考吃光 `max_tokens`，候选 0 条，面板只报「候选生成失败」——DeepSeek 认准 `deepseek-chat`
 - **自定义话术**：env 加一行 `JEV_TONES`（`|` 分隔、每条「名字=说明」，同名覆盖内置，重启生效），如 `摸鱼大师=像资深摸鱼选手，把活推得漂亮又不失礼`；说明写清「什么语气 + 别变成什么」最管用
 - 自查凭据（不打印完整 key）：`uv run python src/generate.py --check`、`uv run python src/judge_jev.py`
@@ -95,6 +128,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - 图片/表情包读不出内容；引用回复当普通文本；公众号卡片可能被当消息解读；微信全屏布局下识别可能失效（布局常量待动态化，见 #17）
 - 微信改版会让布局常量失效（`src/perception.py` 顶部常量需重新校准）；多窗口优先识别主窗口「微信 / WeChat」
 - 启动后第一条判断慢是正常现象（本地模型预热）；不对劲先看日志（分阶段耗时、**不含消息正文**，可放心贴 issue）：`tail -40 ~/Library/Logs/jev-jarvis.log`
+- 本地判断模型首次加载（含下载）期间面板状态行显示「判断模型加载中…」；加载失败会红字提示。内存不足（总内存 < 12GB，或系统内存压力已在警告档）时**不加载本地模型**，每条消息的面板提示会引导改配 `TYPESAFE_API_KEY` 走云端判断——这是为了防止 #37 那种加载把系统推入内存高压、进程被系统直接终止的情况
 
 ## 输入区检测框与填入
 
@@ -119,3 +153,5 @@ chmod 600 ~/.config/jev-jarvis/env
 ## 许可与免责
 
 MIT（见 `LICENSE`）。只读**你自己屏幕上、你自己账号的**聊天内容，不注入、不 hook、不解密数据库、不自动发送任何消息。请在自己设备上自用；装到别人机器上读别人的聊天记录是另一回事，本项目不为那种用法背书。微信改版可能导致布局识别失效，请遵守微信软件许可协议。
+
+**隐私与数据流向**详见 [PRIVACY.md](PRIVACY.md)：聊天内容只发给模型服务商——推荐自配 API key 或本地 Ollama；内置免费通道经作者中转，承诺与提醒见该页。

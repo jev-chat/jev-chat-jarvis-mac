@@ -8,7 +8,7 @@
 # published silently.
 #
 # Usage:
-#   ./packaging/release.sh                     # -> dist/jev-jarvis-<version>-macos.zip + SHA256SUMS
+#   ./packaging/release.sh                     # -> dist/jev-jarvis-macos-v<version>.zip + SHA256SUMS
 #   ./packaging/release.sh --out /tmp/rel      # somewhere else
 #   ./packaging/release.sh --sign "Developer ID Application: X (TEAM)"
 #                                              # 有开发者证书才用；--sign - 是 ad-hoc（不解决 Gatekeeper）
@@ -72,12 +72,16 @@ else
     echo "==> 跳过签名（本机没有开发者证书）"
 fi
 
-ZIP="$OUT/jev-jarvis-$VERSION-macos.zip"
+ZIP="$OUT/jev-jarvis-macos-v$VERSION.zip"
 rm -f "$ZIP"
 echo "==> 压缩"
 # --keepParent: the zip must contain jev-jarvis.app/ itself, so unzipping gives an app
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 ( cd "$OUT" && shasum -a 256 "$(basename "$ZIP")" > SHA256SUMS )
+# fixed asset name so releases/latest/download/<name> is a permanent link (brew taps,
+# installers, docs): uploaded alongside the versioned zip on every release (#31)
+STABLE="$OUT/jev-jarvis-macos-latest.zip"
+cp "$ZIP" "$STABLE"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -117,6 +121,7 @@ if [ "$PUBLISH" = 1 ]; then
         echo "需要 **macOS 13+**。下载即用：解压后把 \`jev-jarvis.app\` 拖进「应用程序」。"
         echo
         echo "**第一次打开**：右键（或按住 Control 点）→ 打开 → 再点「打开」。未做 Apple 公证，双击会被 Gatekeeper 拦，只需这一次。"
+        echo "若弹「**已损坏，无法打开**」（浏览器下载常见，右键无效）：终端执行 \`sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app\` 后再打开。"
         echo "**第一次启动**：联网装依赖（uv 缓存命中就很快）；只需给 \`jev-jarvis\` 授予「屏幕录制」权限，然后退出重开，无需单独授权 \`python3.12\`。"
         echo "**判断层默认跑本地模型，首次要下载约 7GB**（之后离线可用）。不想下这么大：在 \`~/.config/jev-jarvis/env\` 里给判断层配一个 key 走云端，见 README「配置」。"
         echo
@@ -128,15 +133,37 @@ if [ "$PUBLISH" = 1 ]; then
             git -C "$ROOT" log --pretty='- %s' | head -20
         fi
     } > "$NOTES"
-    RELEASE_ARGS=("$TAG" "$ZIP" "$OUT/SHA256SUMS" --title "jev-jarvis $TAG" --notes-file "$NOTES")
+    RELEASE_ARGS=("$TAG" "$ZIP" "$STABLE" "$OUT/SHA256SUMS" --title "jev-jarvis $TAG" --notes-file "$NOTES" --latest)
     # pin the tag: without --target gh tags the default branch tip, which may have moved
     # since the zip was built
     [ -n "$TARGET" ] && RELEASE_ARGS+=(--target "$TARGET")
     gh release create "${RELEASE_ARGS[@]}"
-    echo "    已发布 $TAG"
+    echo "    已发布 $TAG（含稳定名资产 jev-jarvis-macos-latest.zip）"
+
+    # post-publish self-check (#31): never trust the default "Latest" pointer — a late
+    # hotfix of an old version would silently re-point every latest/ download URL
+    echo "==> 发布自检（Latest 指针 + 稳定链接）"
+    latest=""
+    for _ in 1 2 3; do
+        sleep 5
+        latest="$(gh api repos/:owner/:repo/releases/latest --jq .tag_name 2>/dev/null || true)"
+        [ "$latest" = "$TAG" ] && break
+    done
+    if [ "$latest" != "$TAG" ]; then
+        echo "    ✗ Latest 指针指向 ${latest:-<无>} 而非 $TAG，手动修正：gh release edit $TAG --latest" >&2
+        exit 1
+    fi
+    echo "    ✓ Latest 指针 = $TAG"
+    slug="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+    code="$(curl -sIL -o /dev/null -w '%{http_code}' "https://github.com/$slug/releases/latest/download/jev-jarvis-macos-latest.zip" || true)"
+    if [ "$code" != "200" ]; then
+        echo "    ✗ 稳定链接不可用（HTTP $code），检查资产 jev-jarvis-macos-latest.zip 是否上传成功" >&2
+        exit 1
+    fi
+    echo "    ✓ 稳定链接可下载（releases/latest/download/jev-jarvis-macos-latest.zip）"
 else
     echo
     echo "    下一步（发 GitHub Release）："
-    echo "      gh release create v$VERSION \"$ZIP\" \"$OUT/SHA256SUMS\" --title \"jev-jarvis v$VERSION\" --generate-notes"
+    echo "      gh release create v$VERSION \"$ZIP\" \"$STABLE\" \"$OUT/SHA256SUMS\" --title \"jev-jarvis v$VERSION\" --generate-notes --latest"
     echo "    或直接重跑：./packaging/release.sh --publish"
 fi

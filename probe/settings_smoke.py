@@ -36,6 +36,17 @@ def request_button(controller, prefix, title):
     return next(v for v in item.view().subviews() if isinstance(v, A.NSButton) and v.title() == title)
 
 
+def render_window(controller, path):
+    controller.window.display()
+    image = Quartz.CGWindowListCreateImage(
+        Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow,
+        controller.window.windowNumber(), Quartz.kCGWindowImageBoundsIgnoreFraming)
+    if image:
+        data = A.NSBitmapImageRep.alloc().initWithCGImage_(image)
+        data.representationUsingType_properties_(
+            A.NSBitmapImageFileTypePNG, {}).writeToFile_atomically_(path, True)
+
+
 app = A.NSApplication.sharedApplication()
 app.setActivationPolicy_(A.NSApplicationActivationPolicyRegular)
 SettingsNetwork.setUpClass()
@@ -82,12 +93,13 @@ try:
         assert path.stat().st_mode & 0o777 == 0o600
         assert not userconfig.get('OPENAI_API_KEY'), 'must not hot reload'
         assert not c.changed()
-        c.tabs.selectTabViewItemAtIndex_(1)
-        A.NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.2))
-        c.window.display()
-        image = Quartz.CGWindowListCreateImage(Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, c.window.windowNumber(), Quartz.kCGWindowImageBoundsIgnoreFraming)
-        if image:
-            A.NSBitmapImageRep.alloc().initWithCGImage_(image).representationUsingType_properties_(A.NSBitmapImageFileTypePNG, {}).writeToFile_atomically_('/tmp/jev-settings-smoke.png', True)
+        for index, name in enumerate(('jev', 'openai', 'anthropic')):
+            c.tabs.selectTabViewItemAtIndex_(index)
+            A.NSRunLoop.currentRunLoop().runUntilDate_(
+                NSDate.dateWithTimeIntervalSinceNow_(0.1))
+            render_window(c, f'/tmp/jev-settings-{name}.png')
+            if name == 'openai':
+                render_window(c, '/tmp/jev-settings-smoke.png')
         c.window.close()
         reopened = SettingsController.alloc().init().build()
         assert reopened.fields['OPENAI']['MODEL'].stringValue() == 'typed-model'

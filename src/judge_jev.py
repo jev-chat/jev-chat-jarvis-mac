@@ -4,7 +4,10 @@ Jev is a structured-decision model: you hand it a state plus a map of typed ques
 it returns calibrated probabilities — never text. That is exactly our judgment layer, so
 this is a drop-in replacement for the local decider-2b:
 
-    POST {base}/v1/systemone
+    POST {base}/v1/systemone   (base spellings, same rule as the generation layer:
+                                `…` -> `…/v1/systemone`; `…/v1` -> `…/v1/systemone`;
+                                `…/v1/evaluate` -> used verbatim, gateways rename the
+                                action — Vercel serves TypeSafe under /v1/evaluate)
     Authorization: Bearer <key>
     {"model": "jev-latest", "state": "...", "questions": {
         "intent": {"type": "choice", "instructions": "...", "criteria": {...}},
@@ -28,7 +31,7 @@ import time
 import urllib.error
 
 import userconfig
-from generate import http_post_json
+from generate import jev_request_url, http_post_json
 from judge import ACTION_MAP, INTENTS, RISK_LEVELS
 
 DEFAULT_BASE = "https://api.typesafe.ai"
@@ -123,7 +126,9 @@ class JevJudge:
 
     # ------------------------------------------------------------------ transport
     def _post(self, payload: dict) -> dict:
-        url = f"{self.base}/v1/systemone"
+        # Single #42 composition rule (src/generate.py jev_request_url): shared with
+        # the settings window's 测试连接, so a base that tests well cannot judge badly.
+        url = jev_request_url(self.base)
         self._last_url = url
         # 与生成层共用 keep-alive 池（src/generate.py）：判断+排序各一次网络调用，
         # 每次省掉一条 TLS 握手

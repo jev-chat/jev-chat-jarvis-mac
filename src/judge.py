@@ -9,6 +9,8 @@ against a 13.6% majority baseline.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 
 import numpy as np
@@ -55,6 +57,56 @@ ACTION_MAP = {
 }
 
 
+class LowMemoryError(RuntimeError):
+    """The memory guard refused to load the local model (see low_memory_reason)."""
+
+
+# decider-2b at fp16 is ~4.4 GB of weights, and the load path peaks well above that
+# (transformers materializes the weights before the .to(device) copy). #37 reports a
+# 16 GB M4 killed by memory pressure right after the first load. Both thresholds are
+# derived from the weight size, not measured across machines — tune on more hardware
+# before tightening further. Failing open (probe error -> None) is deliberate: the
+# guard may only refuse what it can actually see.
+MIN_TOTAL_BYTES = 12 * 2**30
+
+
+def _memory_pressure_level() -> int | None:
+    """jetsam's own pressure level (1 normal / 2 warning / 3 critical), None if unknown.
+
+    kern.memorystatus_vm_pressure_level is the exact signal macOS kills on, so it is a
+    closer proxy for "will this load get us killed" than free-page arithmetic — macOS
+    reclaims aggressively before those numbers look alarming. One sysctl subprocess on
+    a background warm-up path is irrelevant; judge() only pays it while still unloaded.
+    """
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        return int(out)
+    except Exception:
+        return None
+
+
+def low_memory_reason() -> str | None:
+    """Why loading the local model should be skipped, or None when it looks safe.
+
+    Checked at the top of every _load() attempt, so a guard that fired once gets
+    re-probed on the next message — memory freed up in the meantime lets the local
+    model come back without a restart.
+    """
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        total = 0
+    if total and total < MIN_TOTAL_BYTES:
+        return (f"系统总内存不足（{total / 2**30:.0f}GB），加载本地判断模型可能被系统终止 · "
+                "可配置 TYPESAFE_API_KEY 走云端判断")
+    level = _memory_pressure_level()
+    if level is not None and level >= 2:
+        return ("系统内存压力已处于警告档，加载本地判断模型可能被系统终止 · "
+                "可配置 TYPESAFE_API_KEY 走云端判断")
+    return None
+
+
 class Judge:
     """Wraps a decoder-only decision model; lazy-loads on first use."""
 
@@ -83,6 +135,12 @@ class Judge:
         with self._load_lock:
             if self._loaded:
                 return
+            # Refuse before spending ~5 GB on a machine that cannot hold it (#37): a
+            # load killed mid-flight by jetsam takes the whole app down with no Python
+            # exception to catch, so this check must happen BEFORE from_pretrained.
+            reason = low_memory_reason()
+            if reason:
+                raise LowMemoryError(reason)
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             t = self.torch
@@ -93,7 +151,12 @@ class Judge:
             # steady-state cost in the pipeline, so this is the difference between a ~3 s and a
             # ~4 s reply. CPU has no fp16 win, so it stays fp32.
             dtype = t.float16 if self.device == "mps" else t.float32
-            self.model = AutoModelForCausalLM.from_pretrained(self.repo, dtype=dtype).to(self.device).eval()
+            # low_cpu_mem_usage: stream weights layer-by-layer via the meta device instead
+            # of materializing a full CPU copy first — it flattens the load-time memory
+            # peak, which is exactly what killed #37's machine. Load gets a bit slower;
+            # steady-state inference is untouched.
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.repo, dtype=dtype, low_cpu_mem_usage=True).to(self.device).eval()
             self._letters = [self.tok.encode(c, add_special_tokens=False)[0]
                              for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
             self._loaded = True
