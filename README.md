@@ -132,6 +132,7 @@ chmod 600 ~/.config/jev-jarvis/env
 
 - 左右分句靠 x 坐标，非对称布局可能误判；图片/表情包读不出内容；引用回复当普通文本；公众号文章卡片会被当消息解读
 - 微信改版会让布局常量失效（`src/perception.py` 顶部常量需重新校准）
+- 多窗口时优先识别主窗口「微信 / WeChat」，避免锁定较大的独立窗口；自己发出的短消息不会按昵称过滤，左边缘对齐的紧邻续行保留原消息的发送方。回归检查：`uv run --frozen python probe/perception_regression.py`。
 - 判断模型冷启动 10–20 s 已挪到启动后台预热；启动后第一条慢是正常现象。嫌冷启动慢就把判断层换 TypeSafe Jev（走网络不加载本地模型）
 - 觉得慢/不对先看日志（分阶段耗时、不含消息正文，可放心贴 issue）：`tail -40 ~/Library/Logs/jev-jarvis.log`
 

@@ -107,7 +107,8 @@ def request_screen_capture() -> bool:
 
 
 def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
-    """Largest titled WeChat window (the main one). Independent of window order."""
+    """Prefer the main chat window over larger detached WeChat windows."""
+    main_titles = ("微信", "WeChat")
     opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
     wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     best: WindowInfo | None = None
@@ -128,11 +129,13 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
         if not title or wi.w < 600 or wi.h < 400:
             continue
         # only a titled, window-sized window can be the main chat window
-        if best is None or (wi.w * wi.h, wi.wid) > (best.w * best.h, best.wid):
+        if best is None or (wi.title in main_titles, wi.w * wi.h, wi.wid) > (
+                best.title in main_titles, best.w * best.h, best.wid):
             best = wi
 
     # stick with the window we already chose: WeChat 4.x keeps several equally-sized
-    # windows around, and re-picking each tick let the target jump between them
+    # windows around, and re-picking each tick let the target jump between them.
+    # Only keep that choice within the same priority; a newly available main wins.
     if previous_wid is not None and best is not None and best.wid != previous_wid:
         for w in wins:
             owner = w.get("kCGWindowOwnerName") or ""
@@ -144,7 +147,8 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
             b = dict(w.get("kCGWindowBounds") or {})
             pw = float(b.get("Width", 0))
             ph = float(b.get("Height", 0))
-            if title and pw >= 600 and ph >= 400:
+            if (title and pw >= 600 and ph >= 400
+                    and (title in main_titles) == (best.title in main_titles)):
                 return WindowInfo(wid=previous_wid, pid=int(w.get("kCGWindowOwnerPID") or 0),
                                   title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
                                   w=pw, h=ph)
@@ -435,6 +439,9 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
         # so any 3+ line message was split into ≤2-line chunks — the judge then only ever
         # saw the tail chunk, and the overlay drew a box per chunk
         gap = (b.y - messages[-1].last_y) if messages else 1.0
+        # A shorter continuation has a different center but belongs to the same bubble.
+        if messages and gap < 0.045 and abs(b.x - messages[-1].x) < 0.01:
+            side = messages[-1].side
         if messages and messages[-1].side == side and gap < 0.045:
             messages[-1].lines.append(b.text)
             messages[-1].text = "\n".join(messages[-1].lines)
@@ -457,7 +464,7 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
     named: list[Message] = []
     for i, m in enumerate(messages):
         nxt = messages[i + 1] if i + 1 < len(messages) else None
-        if (nxt is not None and nxt.side == m.side and len(m.text) <= 16
+        if (m.side == "them" and nxt is not None and nxt.side == m.side and len(m.text) <= 16
                 and "\n" not in m.text
                 # two independent signals: the name line is set in smaller type and the
                 # line under it is set in message-sized type. Both must agree — a wrong
@@ -468,8 +475,10 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
             continue
         # A small-type line with nothing message-sized under it is a stray sender name
         # (WeChat renders one above every bubble, including image-only messages). It is
-        # never something to judge, so drop it rather than show it as a message.
-        if m.h < USERNAME_H_MAX and len(m.text) <= 16 and "\n" not in m.text:
+        # never something to judge. Our own bubbles have no sender name above them;
+        # short outgoing text can be just as small, especially in a tall window.
+        if (m.side == "them" and m.h < USERNAME_H_MAX
+                and len(m.text) <= 16 and "\n" not in m.text):
             continue
         named.append(m)
     return named[-max_messages:]
