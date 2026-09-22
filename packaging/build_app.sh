@@ -74,14 +74,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> 写启动器"
-cat > "$APP/Contents/MacOS/jev-jarvis" <<'LAUNCHER'
+echo "==> 写 bootstrap"
+cat > "$APP/Contents/Resources/launcher.zsh" <<'LAUNCHER'
 #!/bin/zsh
-# Launcher: bootstrap the uv environment once, then exec the app.
+# Bootstrap: prepare the uv environment, then run the app under the native launcher.
 set -u
 
-RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
-APP_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+RES="$(cd "$(dirname "$0")" && pwd)"
 SUPPORT="$HOME/Library/Application Support/jev-jarvis"
 CONFIG="$HOME/.config/jev-jarvis"
 VENV="$SUPPORT/venv"
@@ -150,12 +149,21 @@ LAUNCHER
 
 # the pin is injected here rather than written into the heredoc: the heredoc is quoted
 # (so nothing else in the launcher gets expanded at build time), this keeps it that way
-sed -i '' "s/@PYTHON_PIN@/${PY_PIN}/g" "$APP/Contents/MacOS/jev-jarvis"
-if grep -q '@PYTHON_PIN@' "$APP/Contents/MacOS/jev-jarvis"; then
-    echo "启动器里的 Python 版本占位符没替换成功" >&2
+sed -i '' "s/@PYTHON_PIN@/${PY_PIN}/g" "$APP/Contents/Resources/launcher.zsh"
+if grep -q '@PYTHON_PIN@' "$APP/Contents/Resources/launcher.zsh"; then
+    echo "bootstrap 里的 Python 版本占位符没替换成功" >&2
     exit 1
 fi
-chmod +x "$APP/Contents/MacOS/jev-jarvis"
+chmod +x "$APP/Contents/Resources/launcher.zsh"
+
+echo "==> 编译原生启动器"
+if ! xcrun --find clang >/dev/null 2>&1; then
+    echo "未找到 clang；构建 .app 需要 Xcode Command Line Tools" >&2
+    exit 1
+fi
+xcrun clang -std=c11 -Os -Wall -Wextra -Werror \
+    -mmacosx-version-min=13.0 \
+    "$ROOT/packaging/launcher.c" -o "$APP/Contents/MacOS/jev-jarvis"
 
 echo "==> 生成图标"
 PY="$ROOT/.venv/bin/python"
@@ -182,11 +190,13 @@ check() {  # fail the build instead of shipping a broken bundle silently
 }
 check "Info.plist 合法"            "plutil -lint '$APP/Contents/Info.plist'"
 check "启动器可执行"                "[ -x '$APP/Contents/MacOS/jev-jarvis' ]"
+check "启动器是原生 Mach-O"         "file '$APP/Contents/MacOS/jev-jarvis' | grep -q 'Mach-O'"
+check "bootstrap 可执行"            "[ -x '$APP/Contents/Resources/launcher.zsh' ]"
 check "源码进包（hud.py）"          "[ -f '$APP/Contents/Resources/app/src/hud.py' ]"
 check "锁文件进包（uv.lock）"        "[ -f '$APP/Contents/Resources/app/uv.lock' ]"
 check "Python 版本进包"             "[ -f '$APP/Contents/Resources/app/.python-version' ]"
 check "许可证进包（MIT）"           "[ -f '$APP/Contents/Resources/app/LICENSE' ]"
-check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/MacOS/jev-jarvis'"
+check "依赖版本已冻结到 $PY_PIN"     "grep -q '${PY_PIN}' '$APP/Contents/Resources/launcher.zsh'"
 check "没夹带缓存"                  "[ ! -d '$APP/Contents/Resources/app/src/__pycache__' ]"
 # a key that leaked into src/ would ship to whoever gets the bundle. src/builtin.py is the
 # single deliberate exception — it holds the shared default that lets an unconfigured install

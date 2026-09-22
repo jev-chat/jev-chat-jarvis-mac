@@ -93,6 +93,8 @@ check() {
 }
 check "解压得到 jev-jarvis.app"      "[ -d '$TMP/jev-jarvis.app' ]"
 check "启动器带可执行权限"            "[ -x '$TMP/jev-jarvis.app/Contents/MacOS/jev-jarvis' ]"
+check "启动器是原生 Mach-O"           "file '$TMP/jev-jarvis.app/Contents/MacOS/jev-jarvis' | grep -q 'Mach-O'"
+check "bootstrap 带可执行权限"        "[ -x '$TMP/jev-jarvis.app/Contents/Resources/launcher.zsh' ]"
 check "Info.plist 合法"             "plutil -lint '$TMP/jev-jarvis.app/Contents/Info.plist'"
 check "图标在"                      "[ -f '$TMP/jev-jarvis.app/Contents/Resources/AppIcon.icns' ]"
 check "包内 Python 版本已钉住"        "[ -f '$TMP/jev-jarvis.app/Contents/Resources/app/.python-version' ]"
@@ -115,7 +117,7 @@ if [ "$PUBLISH" = 1 ]; then
         echo "需要 **macOS 13+**。下载即用：解压后把 \`jev-jarvis.app\` 拖进「应用程序」。"
         echo
         echo "**第一次打开**：右键（或按住 Control 点）→ 打开 → 再点「打开」。未做 Apple 公证，双击会被 Gatekeeper 拦，只需这一次。"
-        echo "**第一次启动**：联网装依赖（uv 缓存命中就很快）；**按提示授予「屏幕录制」权限，然后退出重开**。"
+        echo "**第一次启动**：联网装依赖（uv 缓存命中就很快）；只需给 \`jev-jarvis\` 授予「屏幕录制」权限，然后退出重开，无需单独授权 \`python3.12\`。"
         echo "**判断层默认跑本地模型，首次要下载约 7GB**（之后离线可用）。不想下这么大：在 \`~/.config/jev-jarvis/env\` 里给判断层配一个 key 走云端，见 README「配置」。"
         echo
         echo "### 本次包含"

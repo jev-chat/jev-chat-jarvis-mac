@@ -22,7 +22,7 @@ Mac 版 V0：**纯只读、零封号风险**——不注入、不 hook、不解�
 
 ## 用法
 
-**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases) 下载 `.app`，解压拖进「应用程序」。**第一次打开要右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）；首次启动联网装依赖约 3 s，授予「屏幕录制」权限后**退出重开**。
+**只想用**：[Releases](https://github.com/jev-chat/jev-chat-jarvis-mac/releases) 下载 `.app`，解压拖进「应用程序」。**第一次打开要右键 → 打开**（没做公证，双击会被 Gatekeeper 拦）；首次启动联网装依赖约 3 s，只需给 `jev-jarvis` 授予「屏幕录制」权限，然后**退出重开**，无需单独授权 `python3.12`。
 
 **从源码跑**（微信在运行、终端已授予「屏幕录制」）：`./start.command`。「填入」另需「辅助功能」权限，第一次点会弹系统授权框。分层自测：
 
