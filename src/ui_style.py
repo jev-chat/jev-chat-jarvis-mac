@@ -30,6 +30,17 @@ PALETTE = {
     "track": rgb(0xB8C1C6, 0.42),
 }
 
+# Opaque layers need their own contrast; white-on-white vibrancy colors disappear
+# when macOS substitutes a solid backdrop for Reduce Transparency.
+SOLID_PALETTE = {
+    "bg": rgb(0xE7EEEB),
+    "surface": rgb(0xFFFFFF),
+    "row": rgb(0xF5F8F6),
+    "field": rgb(0xEAF1ED),
+    "edge": rgb(0xC5D2CB),
+    "track": rgb(0xD3DED8),
+}
+
 RADIUS_FIELD = 8
 RADIUS_CARD = 12
 

@@ -201,6 +201,11 @@ class HudController(NSObject):
         self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
         self._group_boxes: list = []    # translucent surfaces behind active tone groups
         self._rows: list = []
+        self._appearance_surfaces = []
+        self._appearance_buttons = []
+        self._message_expanded = False
+        self._message_text = ""
+        self._layout_key = None
         self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
         self._detail_views: list = []   # non-data chrome hidden with the expanded details
         self._risk_dots: list = []      # low / medium / high indicators, presentation only
@@ -292,6 +297,12 @@ class HudController(NSObject):
         view.setState_(AppKit.NSVisualEffectStateActive)
         view.setWantsLayer_(True)
         view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
+        # A tint subview sits above the system material. Setting the effect view's
+        # backing-layer color alone can be covered by macOS's accessibility fallback.
+        self._solid_backdrop = ui_style.make_surface(0, NSColor.clearColor())
+        self._solid_backdrop.setFrame_(view.bounds())
+        self._solid_backdrop.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
+        view.addSubview_(self._solid_backdrop)
         self.rows: dict[str, NSTextField] = {}
 
         # The latest master adds model settings to this same header. Keep it as a quiet,
@@ -322,6 +333,8 @@ class HudController(NSObject):
             (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 72),
             (self._make_surface(10, PALETTE["surface"]), 14, 204, PANEL_W - 28, 34),
         ):
+            if top == 54:
+                self._message_surface = surface
             view.addSubview_(surface)
             self._fixed.append((surface, x, top, w, h))
             self._detail_views.append(surface)
@@ -364,8 +377,8 @@ class HudController(NSObject):
         for key, x, top, w, h, size, color, bold in (
             ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["accent"], True),
             ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
-            ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
-            ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
+            ("message", 22, 82, PANEL_W - 44, 38, 14, PALETTE["text"], False),
+            ("sender", 22, 62, PANEL_W - 112, 14, 10, PALETTE["muted"], False),
             ("intent", 26, 136, 116, 26, 20, PALETTE["text"], True),
             ("confidence", 26, 166, 116, 16, 11, PALETTE["muted"], False),
             ("risk", 164, 137, 92, 24, 14, PALETTE["green"], True),
@@ -374,11 +387,34 @@ class HudController(NSObject):
             tf = self._make_label(x, 0, w, h, size=size, color=color, bold=bold)
             if key in {"message", "actions"}:
                 tf.cell().setWraps_(True)
-            view.addSubview_(tf)
             self.rows[key] = tf
-            self._fixed.append((tf, x, top, w, h))
+            if key == "message":
+                tf.cell().setScrollable_(False)
+                tf.cell().setUsesSingleLineMode_(False)
+                tf.cell().setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                tf.setMaximumNumberOfLines_(2)
+                scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(x, 0, w, h))
+                scroll.setDrawsBackground_(False)
+                scroll.setHasVerticalScroller_(False)
+                scroll.setAutohidesScrollers_(True)
+                scroll.setScrollerStyle_(AppKit.NSScrollerStyleOverlay)
+                scroll.setDocumentView_(tf)
+                self._message_scroll = scroll
+                view.addSubview_(scroll)
+                self._fixed.append((scroll, x, top, w, h))
+                self._detail_views.append(scroll)
+            else:
+                view.addSubview_(tf)
+                self._fixed.append((tf, x, top, w, h))
             if key not in {"chat", "status"}:
                 self._detail_views.append(tf)
+
+        self._message_toggle = self._make_button(PANEL_W - 82, 0, 60, 18,
+                                                  "展开 ▾", "toggleMessage:", 0)
+        self._message_toggle.setAccessibilityLabel_("展开或收起完整消息")
+        view.addSubview_(self._message_toggle)
+        self._fixed.append((self._message_toggle, PANEL_W - 82, 60, 60, 18))
+        self._detail_views.append(self._message_toggle)
 
         header = self._make_label(18, 0, PANEL_W - 36, 18,
                                   size=12, color=PALETTE["text"], bold=True)
@@ -455,6 +491,10 @@ class HudController(NSObject):
         self.rows["status"].setStringValue_("等待微信消息…")
         self._wire_window_controls()
         self._install_status_item()
+        AppKit.NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+            self, "accessibilityDisplayChanged:",
+            AppKit.NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, None)
+        self.applyAccessibilityAppearance_(None)
 
     @objc.python_method
     def _build_overlay(self):
@@ -495,7 +535,15 @@ class HudController(NSObject):
         neither a dropdown's worth of rows nor its candidates, which is what removes the dead
         space a fixed-height panel left in the middle.
         """
-        dy = self._group_top
+        message_h, document_h, overflow = self._message_metrics()
+        message_delta = message_h - 26  # sender row now precedes the body
+        self._message_toggle.setHidden_(not overflow)
+        self._message_toggle.setTitle_("收起 ▴" if self._message_expanded else "展开 ▾")
+        self._message_scroll.setHasVerticalScroller_(document_h > message_h)
+        field = self.rows["message"]
+        field.setMaximumNumberOfLines_(0 if self._message_expanded else 2)
+        field.setFrame_(NSMakeRect(0, 0, PANEL_W - 44, document_h))
+        dy = self._group_top + message_delta
         placements = []          # (control, x, dy_from_top, w, h)
         for slot in range(styles.MAX_SLOTS):
             active = self._slot_active(slot)
@@ -547,7 +595,16 @@ class HudController(NSObject):
         content_h = dy + BOTTOM_PAD
         view = self.panel.contentView()
         view.setFrameSize_(NSMakeSize(PANEL_W, content_h))
-        for ctrl, x, top, w, h in placements + self._fixed:
+        fixed = []
+        for ctrl, x, top, w, h in self._fixed:
+            if ctrl is self._message_surface:
+                h += message_delta
+            elif ctrl is self._message_scroll:
+                h = message_h
+            elif top >= 124:
+                top += message_delta
+            fixed.append((ctrl, x, top, w, h))
+        for ctrl, x, top, w, h in placements + fixed:
             ctrl.setFrame_(NSMakeRect(x, content_h - top - h, w, h))
 
         # resize the window with its TOP edge pinned: growing downwards is what the eye
@@ -625,7 +682,46 @@ class HudController(NSObject):
     @objc.python_method
     def _make_surface(self, radius: float, color: NSColor,
                       border: NSColor | None = None) -> NSView:
-        return ui_style.make_surface(radius, color, border)
+        surface = ui_style.make_surface(radius, color, border)
+        self._appearance_surfaces.append((surface, radius, color, border))
+        return surface
+
+    def accessibilityDisplayChanged_(self, notification):
+        # Workspace notifications are independent of the polling/model workers.
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "applyAccessibilityAppearance:", None, False)
+
+    def applyAccessibilityAppearance_(self, notification):
+        reduced = AppKit.NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+        self._apply_accessibility_palette(bool(reduced))
+
+    @objc.python_method
+    def _apply_accessibility_palette(self, reduced):
+        def adapted(color):
+            if color is None or not reduced:
+                return color
+            for key, replacement in ui_style.SOLID_PALETTE.items():
+                if color.isEqual_(PALETTE[key]):
+                    return replacement
+            return color  # risk/status colors retain their semantic meaning
+
+        background = ui_style.SOLID_PALETTE["bg"] if reduced else NSColor.clearColor()
+        self._solid_backdrop.layer().setBackgroundColor_(background.CGColor())
+        for surface, radius, color, original_border in self._appearance_surfaces:
+            layer = surface.layer()
+            layer.setBackgroundColor_(adapted(color).CGColor())
+            border = adapted(original_border)
+            if reduced and color.isEqual_(PALETTE["surface"]):
+                border = ui_style.SOLID_PALETTE["edge"]
+            layer.setBorderWidth_(0.75 if border is not None else 0)
+            if border is not None:
+                layer.setBorderColor_(border.CGColor())
+        for button in self._appearance_buttons:
+            if button is self.settings_button:
+                continue  # the gear stays an unboxed icon
+            button.layer().setBackgroundColor_(adapted(PALETTE["row"]).CGColor())
+            button.layer().setBorderColor_(adapted(PALETTE["edge"]).CGColor())
+        self.panel.contentView().setNeedsDisplay_(True)
 
     @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
@@ -641,6 +737,7 @@ class HudController(NSObject):
         btn.setAction_(action)
         btn.setTag_(tag)
         btn.setHidden_(True)
+        self._appearance_buttons.append(btn)
         return btn
 
     @objc.python_method
@@ -660,9 +757,40 @@ class HudController(NSObject):
     @objc.python_method
     def _render(self, key: str, text: str, color: NSColor | None = None):
         tf = self.rows[key]
+        if key == "message" and text != self._message_text:
+            self._message_expanded = False
+            self._message_text = text
         tf.setStringValue_(text)
+        if key == "message" and not self._collapsed:
+            self._relayout()
+            tf.scrollRectToVisible_(NSMakeRect(0, max(0, tf.frame().size.height - 1), 1, 1))
         if color is not None:
             tf.setTextColor_(color)
+
+    @objc.python_method
+    def _message_metrics(self):
+        field = self.rows["message"]
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            field.stringValue() or " ", {NSFontAttributeName: field.font()})
+        bounds = attributed.boundingRectWithSize_options_(
+            NSMakeSize(PANEL_W - 50, 100000),
+            AppKit.NSStringDrawingUsesLineFragmentOrigin | AppKit.NSStringDrawingUsesFontLeading)
+        two_lines = NSAttributedString.alloc().initWithString_attributes_(
+            "国\n国", {NSFontAttributeName: field.font()})
+        two_bounds = two_lines.boundingRectWithSize_options_(
+            NSMakeSize(PANEL_W - 50, 100000),
+            AppKit.NSStringDrawingUsesLineFragmentOrigin | AppKit.NSStringDrawingUsesFontLeading)
+        collapsed = float(int(two_bounds.size.height + 5.999))
+        full = max(collapsed, float(int(bounds.size.height + 5.999)))
+        overflow = full > collapsed
+        document = full if self._message_expanded else collapsed
+        return min(180, document), document, overflow
+
+    def toggleMessage_(self, sender):
+        self._message_expanded = not self._message_expanded
+        self._relayout()
+        field = self.rows["message"]
+        field.scrollRectToVisible_(NSMakeRect(0, max(0, field.frame().size.height - 1), 1, 1))
 
     @objc.python_method
     def _set_candidate_header(self, text: str):
@@ -1147,7 +1275,8 @@ class HudController(NSObject):
             return
         try:
             res = read_conversation(previous_wid=self._win_wid,
-                                    prev_fingerprint=self._fingerprint)
+                                    prev_fingerprint=self._fingerprint,
+                                    prev_layout=getattr(self, "_layout_key", None))
         except Exception as e:
             self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
             self._next_read_ts = time.time() + SLOW_TICK
@@ -1166,6 +1295,7 @@ class HudController(NSObject):
         # message is noticed quickly (this also feeds _stable_n, the early-settle signal),
         # and only a pane that keeps moving settles back to SLOW_TICK like the old poll.
         self._fingerprint = res.get("fingerprint")
+        self._layout_key = res.get("layout")
         if res["unchanged"]:
             self._stable_n += 1
             self._burst_left = BURST_READS
@@ -1182,6 +1312,7 @@ class HudController(NSObject):
         # showed up as a visible jump after the verdict landed. Pushed on unchanged
         # frames too — the window can move while its pixels stay identical.
         live_window = res["window"]
+        live_input_rect = res.get("input_rect")
         self._win_wid = res["window"]["wid"]
         self._push("applyPosition:", res["window"])
         if res["unchanged"] and self._last_full is not None:
@@ -1192,7 +1323,7 @@ class HudController(NSObject):
             self._last_full = res
             self._push("applyChat:", res.get("chat_title") or "")
 
-        res = dict(res, window=live_window)
+        res = dict(res, window=live_window, input_rect=live_input_rect)
         # AX traversal stays on the read worker, never the Cocoa drawing thread.
         now_input = time.monotonic()
         if (res["window"] != getattr(self, "_input_window", None)
@@ -1200,7 +1331,8 @@ class HudController(NSObject):
             self._input_target = fill.locate_input(res["window"])
             if self._input_target["box"] is None:
                 from input_region import locate_visual_input
-                self._input_target["visual_rect"] = locate_visual_input(res["window"])
+                self._input_target["visual_rect"] = (res.get("input_rect")
+                                                     or locate_visual_input(res["window"]))
                 if self._input_target["visual_rect"]:
                     from visual_fill import chat_signature
                     self._input_target["chat_signature"] = chat_signature(res["window"], self._input_target["visual_rect"])
@@ -1227,7 +1359,8 @@ class HudController(NSObject):
             self._push("applyBoxes:", (res["window"], msgs,
                                        newest.text if newest else None))
         if newest is None:
-            self._push("applyWaiting:", None)
+            self._push("applyWaiting:", "暂未确认输入区边界，暂停分析"
+                       if res.get("input_unresolved") else None)
             return
         now = time.time()
 
@@ -1638,7 +1771,7 @@ class HudController(NSObject):
         else:
             # Lightweight test harnesses load this callback without constructing AppKit.
             self.rows["cand_header"].setStringValue_("候选回复")
-        self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
+        self._render("status", _payload or "等待可确认的对方消息…", PALETTE["muted"])
 
     # --- main-thread callbacks (AppKit is not thread safe)
     def applyChat_(self, title):
