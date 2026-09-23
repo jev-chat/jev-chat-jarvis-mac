@@ -47,6 +47,27 @@ jobs:
             --fail-under="$(cat ci/coverage-min.txt)"
           uv run --locked --with coverage coverage xml --omit=src/judge_zh_test.py -o coverage.xml
 
+      # 基线棘轮的机械保证（仅 PR）：基线相对 origin/master 只许持平或上调，下调即红
+      # ——「只升不降」不靠 review 自觉。确需下调（如移除大模块）在 PR 里说明理由，
+      # 维护者特批。基线文件在 origin/master 尚不存在时（首个引入 PR）视为 0 放行。
+      - name: 基线棘轮（coverage-min 只许升，仅 PR）
+        if: github.event_name == 'pull_request'
+        run: |
+          LOCAL="$(tr -d '[:space:]' < ci/coverage-min.txt)"
+          BASE="$(git show origin/master:ci/coverage-min.txt 2>/dev/null | tr -d '[:space:]')"
+          # git show 失败（origin/master 尚无基线文件，首个引入 PR）视为 0；
+          # 注意兜底不能写成 `|| echo 0`——那绑在管道末端的 tr 上，失败时 BASE 为空
+          [ -n "$BASE" ] || BASE=0
+          if [ -z "$LOCAL" ]; then
+            echo "::error::ci/coverage-min.txt 为空或缺失——基线棘轮无法判定"
+            exit 1
+          fi
+          echo "覆盖率基线：本 PR=${LOCAL}  origin/master=${BASE}"
+          if [ "$LOCAL" -lt "$BASE" ]; then
+            echo "::error::覆盖率基线从 ${BASE} 下调到 ${LOCAL}——棘轮只许升不许降；确需下调请在 PR 描述说明理由，交维护者特批"
+            exit 1
+          fi
+
       # 增量覆盖率门禁（仅 PR）：相对 origin/master 的改动/新增行 ≥80% 须被测试触达，
       # 存量零追缴（存量由上面的全局基线管，这里只管增量）。master push 无增量语义，
       # 跳过；diff 里无 Python 改动时直接绿，纯 CI/文档 PR 不误伤。
