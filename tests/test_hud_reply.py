@@ -443,29 +443,22 @@ class HudReplyTests(unittest.TestCase):
                 self.assertIn('合成群背景', self.h._pregen_req[1])
             self.assertEqual(len(self.h.conversations.history('项目讨论组')), 1)
 
-    def test_default_storage_follows_source_project_but_stays_outside_app_bundle(self):
+    def test_default_storage_lives_in_home_support_for_source_and_app_alike(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             home = root / 'home'
-            for project, expected in [
-                (root / '项目目录', root / '项目目录/.local/data/conversations.json'),
-                (root / 'Jev.app/Contents/Resources/app',
-                 home / 'Library/Application Support/jev-jarvis/conversations.json'),
-            ]:
-                with self.subTest(project=project), \
-                     patch.object(chat_context, '__file__', str(project / 'src/chat_context.py')), \
-                     patch.object(Path, 'home', return_value=home):
-                    self.h.conversations = chat_context.Conversations()
-                    self.h.configure_context(True, '20')
-                    self.read([block('合成讨论消息', .40, .70, .15)])
-                    self.h.save_background('chat', '合成人物背景')
-                    self.assertTrue(expected.is_file())
-                    self.assertEqual(expected.stat().st_mode & 0o777, 0o600)
-                    restored = chat_context.Conversations()
-                    self.assertEqual(restored.background('chat'), '合成人物背景')
-                    self.assertEqual(restored.history('chat')[0][0], '合成讨论消息')
-                    if project.name == 'app':
-                        self.assertFalse((project / '.local').exists())
+            expected = home / 'Library/Application Support/jev-jarvis/conversations.json'
+            with patch.object(Path, 'home', return_value=home):
+                self.h.conversations = chat_context.Conversations()
+                self.assertEqual(self.h.conversations.path, expected)
+                self.h.configure_context(True, '20')
+                self.read([block('合成讨论消息', .40, .70, .15)])
+                self.h.save_background('chat', '合成人物背景')
+                restored = chat_context.Conversations()
+            self.assertTrue(expected.is_file())
+            self.assertEqual(expected.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(restored.background('chat'), '合成人物背景')
+            self.assertEqual(restored.history('chat')[0][0], '合成讨论消息')
 
     def test_only_own_short_message_never_enqueues_models(self):
         messages = self.read([block('11', .862, .284, .024, .024)])

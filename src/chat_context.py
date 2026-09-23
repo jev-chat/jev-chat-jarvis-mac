@@ -43,12 +43,9 @@ class Conversations:
         self.error = ""
         self.revision = 0
         self._stamp = object()
-        project = Path(__file__).resolve().parent.parent
-        bundled = (project.parent.name == 'Resources'
-                   and project.parent.parent.name == 'Contents'
-                   and project.parent.parent.parent.suffix.lower() == '.app')
-        self.path = path or (Path.home() / 'Library/Application Support/jev-jarvis/conversations.json'
-                             if bundled else project / '.local/data/conversations.json')
+        # One home for source runs and the packaged app alike — the directory that already
+        # holds the venv and the env fallback (userconfig.config_dirs); tests pass paths.
+        self.path = path or Path.home() / 'Library/Application Support/jev-jarvis/conversations.json'
         self.reload()
 
     def _file_stamp(self, fd=None):

@@ -109,7 +109,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - **管理记录 → 清空所选会话记录／清空全部记录**：立即删除相应已存消息，保留背景；后续有效读屏仍按开关继续记录。
 - 设置沿用 env：`JEV_HISTORY=0`（关闭）或 `1`（开启），`JEV_CONTEXT_MESSAGES=20`。非法条数不接受；启动时无效值回退为 20。通过本页保存的值重启后仍可编辑；真正由启动环境变量传入的值优先，对应选项不可编辑，需修改环境变量后重启。
 
-源码运行时，历史和背景保存在项目根目录的 `.local/data/conversations.json`，不随启动时的工作目录变化；打包的 `.app` 继续使用用户应用数据目录。
+历史和背景保存在 `~/Library/Application Support/jev-jarvis/conversations.json`，源码运行与打包 `.app` 使用同一位置，不随启动时的工作目录变化。
 
 历史和背景仅保存在本机，但推理时会发给当前选择的模型服务及配置的中转；服务地址可在对应模型设置页配置，修改后需重启生效，服务方的留存政策由其决定。应用不增加历史云同步或项目后台存档，详见 [隐私说明](PRIVACY.md)。
 
@@ -118,7 +118,7 @@ chmod 600 ~/.config/jev-jarvis/env
 | 内容 | 位置 | 大小 | 清理 |
 |---|---|---|---|
 | 判断层本地模型 `decider-2b`（首次启动引导选择后才下载，判断+排序共用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~3.8 GB | 模型设置 →「判断 · Jev」页「删除模型…」；或 `rm -rf ~/.cache/huggingface/hub/models--Mapika--decider-2b`；之后走本地判断会重新下载 |
-| 会话历史与背景 | 源码运行：项目根目录 `.local/data/conversations.json`；`.app`：`~/Library/Application Support/jev-jarvis/conversations.json`（均为权限 `600`） | 每会话最多 100 条，背景独立 | 设置 → 会话记录与背景 → 管理记录；背景清空后保存。删除应用不会自动删除此数据文件 |
+| 会话历史与背景 | `~/Library/Application Support/jev-jarvis/conversations.json`（权限 `600`） | 每会话最多 100 条，背景独立 | 设置 → 会话记录与背景 → 管理记录；背景清空后保存。删除应用不会自动删除此数据文件 |
 | Python 运行环境（venv） | `~/Library/Application Support/jev-jarvis/venv` | ~0.7 GB | 删除 .app 不会连带删它，需手动删 |
 
 生成层配 Ollama 的话模型在 Ollama 自己的目录（`~/.ollama`），非本项目下载。
