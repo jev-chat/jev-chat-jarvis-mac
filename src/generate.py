@@ -556,12 +556,11 @@ class Generator:
         try:
             raw = self._call(prompt, on_delta if on_line is not None else None)
         except ThinkingOnlyError as e:
-            return [], str(e)            # already panel-ready: model named, fix suggested
+            return [], "模型仅返回思考内容，请关闭思考模式或更换模型"
         except urllib.error.HTTPError as e:
-            detail = e.read()[:160].decode(errors="replace")
-            return [], f"HTTP {e.code} @ {self._last_url} — {detail}"
+            return [], f"HTTP {e.code}：请检查模型服务设置"
         except Exception as e:
-            return [], f"{type(e).__name__}: {e}"
+            return [], type(e).__name__
         if on_line is not None:
             # Sync the callback with the authoritative parse. Two ways lines can be
             # missing from what the stream emitted: the model often stops without a

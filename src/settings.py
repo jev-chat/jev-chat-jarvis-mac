@@ -1,4 +1,4 @@
-"""Native model settings, opened from the HUD menu. Saving requires a restart."""
+"""Native settings: models require a restart; conversation changes apply on save."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,8 @@ PALETTE = ui_style.PALETTE
 
 class SettingsController(NSObject):
     @objc.python_method
-    def build(self):
+    def build(self, hud=None):
+        self.hud = hud
         self.path = userconfig.env_files()[0]
         self.original = config.read_document(self.path)
         values = userconfig.parse_env_file(self.path)
@@ -35,7 +36,7 @@ class SettingsController(NSObject):
             A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable,
             A.NSBackingStoreBuffered, False)
         self.window.setAppearance_(A.NSAppearance.appearanceNamed_(A.NSAppearanceNameAqua))
-        self.window.setTitle_("模型设置 · 保存后重启生效")
+        self.window.setTitle_("设置 · 模型与会话上下文")
         self.window.setOpaque_(False)
         self.window.setBackgroundColor_(A.NSColor.clearColor())
         self.window.setHasShadow_(True)
@@ -53,7 +54,7 @@ class SettingsController(NSObject):
         view.layer().setBackgroundColor_(PALETTE["bg"].CGColor())
         self.window.setContentView_(view)
 
-        title = self.label(view, "模型设置", 24, 598, 710, 28, 22)
+        title = self.label(view, "模型与会话设置", 24, 598, 710, 28, 22)
         title.setFont_(A.NSFont.boldSystemFontOfSize_(22))
         title.setTextColor_(PALETTE["text"])
         self.label(view, "编辑文件：" + str(self.path).replace(str(Path.home()), "~"),
@@ -64,7 +65,7 @@ class SettingsController(NSObject):
             PALETTE["amber"].colorWithAlphaComponent_(0.18))
         restart_box.setFrame_(NSMakeRect(24, 530, 710, 34))
         view.addSubview_(restart_box)
-        restart_notice = self.label(view, "保存后请退出应用并重启",
+        restart_notice = self.label(view, "模型配置保存后重启 · 会话设置保存后立即生效",
                                     38, 536, 680, 20, 13, PALETTE["amber"])
         restart_notice.setFont_(A.NSFont.boldSystemFontOfSize_(13))
 
@@ -124,6 +125,7 @@ class SettingsController(NSObject):
                 self.controls.append(button)
             item.setView_(panel)
             self.tabs.addTabViewItem_(item)
+        self.build_context_tab()
         view.addSubview_(self.tabs)
         # #38: 离线判断模型管理。删除是显式确认动作；「启用」只写选择，真正的
         # 下载发生在下次启动的预热——设置窗口里不藏一个 7 GB 的下载按钮。
@@ -147,7 +149,167 @@ class SettingsController(NSObject):
         self.save_button = self.button(view, "保存配置", "saveSettings:", 602, 29, 132, True)
         self.controls.append(self.save_button)
         self.window.center()
+        self.refresh_contexts()
         return self
+
+    @objc.python_method
+    def build_context_tab(self):
+        import chat_context
+        item = A.NSTabViewItem.alloc().initWithIdentifier_("CONTEXT")
+        item.setLabel_("会话记录与背景")
+        panel = A.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 690, 300))
+        group = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
+        group.setFrame_(NSMakeRect(12, 168, 666, 120))
+        panel.addSubview_(group)
+        title = self.label(panel, "记录聊天历史", 26, 254, 490, 20, 13)
+        title.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.label(panel, "每个会话保留最近 100 条，关闭后保留已有记录", 26, 235, 530, 18, 11, PALETTE["muted"])
+        self.history_switch = A.NSSwitch.alloc().initWithFrame_(NSMakeRect(610, 242, 46, 28))
+        self.history_switch.setAccessibilityLabel_("记录聊天历史")
+        self.history_switch.setTarget_(self)
+        self.history_switch.setAction_("contextControlChanged:")
+        enabled = self.hud.history_enabled if self.hud else userconfig.get("JEV_HISTORY") == "1"
+        self.history_switch.setState_(A.NSOnState if enabled else A.NSOffState)
+        panel.addSubview_(self.history_switch)
+        divider = ui_style.make_surface(0, PALETTE["edge"])
+        divider.setFrame_(NSMakeRect(26, 228, 638, 1))
+        panel.addSubview_(divider)
+        title = self.label(panel, "模型参考条数", 26, 204, 490, 20, 13)
+        title.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.label(panel, "使用最近的消息，包含当前消息（1—100 条）", 26, 185, 530, 18, 11, PALETTE["muted"])
+        self.context_count = A.NSTextField.alloc().initWithFrame_(NSMakeRect(580, 194, 56, 28))
+        try:
+            count = self.hud.context_limit if self.hud else chat_context.message_limit(
+                userconfig.get("JEV_CONTEXT_MESSAGES") or "20")
+        except ValueError:
+            count = 20
+        self.context_count.setStringValue_(str(count))
+        self.style_field(self.context_count)
+        self.context_count.setAlignment_(A.NSTextAlignmentCenter)
+        self.context_count.setDelegate_(self)
+        self.context_count.setAccessibilityLabel_("模型参考条数，1 到 100")
+        panel.addSubview_(self.context_count)
+        self.label(panel, "条", 642, 197, 22, 20, 11, PALETTE["muted"])
+        self.initial.update({"JEV_HISTORY": "1" if enabled else "0", "JEV_CONTEXT_MESSAGES": str(count)})
+        for key, control in (("JEV_HISTORY", self.history_switch),
+                             ("JEV_CONTEXT_MESSAGES", self.context_count)):
+            if userconfig.source_of(key) == "环境变量":
+                control.setEnabled_(False)
+                control.setToolTip_("由启动环境变量控制；修改环境变量后重启。")
+        title = self.label(panel, "聊天背景", 18, 138, 300, 22, 13)
+        title.setFont_(A.NSFont.boldSystemFontOfSize_(13))
+        self.context_picker = A.NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(428, 136, 244, 28), False)
+        self.context_picker.setFont_(A.NSFont.systemFontOfSize_(12))
+        self.context_picker.setAccessibilityLabel_("选择要编辑背景的会话")
+        self.context_picker.setTarget_(self)
+        self.context_picker.setAction_("selectContext:")
+        panel.addSubview_(self.context_picker)
+        scroll = A.NSScrollView.alloc().initWithFrame_(NSMakeRect(18, 34, 650, 94))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(A.NSNoBorder)
+        scroll.setWantsLayer_(True)
+        scroll.layer().setCornerRadius_(ui_style.RADIUS_FIELD)
+        scroll.layer().setBorderColor_(PALETTE["edge"].CGColor())
+        scroll.layer().setBorderWidth_(0.75)
+        scroll.layer().setMasksToBounds_(True)
+        self.background_editor = A.NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 630, 94))
+        self.background_editor.setRichText_(False)
+        self.background_editor.setFont_(A.NSFont.systemFontOfSize_(12))
+        self.background_editor.setTextColor_(PALETTE["text"])
+        self.background_editor.setBackgroundColor_(PALETTE["field"])
+        self.background_editor.setTextContainerInset_((10, 8))
+        self.background_editor.setAccessibilityLabel_("所选会话背景，可输入多行，清空后保存可删除背景")
+        self.background_editor.setToolTip_("例如：AAA 是群主，BBB 是公司老板。背景不占消息条数；清空后保存可删除背景。")
+        self.background_editor.setDelegate_(self)
+        self.context_title = ""
+        self.background_initial = {}
+        self.background_drafts = {}
+        scroll.setDocumentView_(self.background_editor)
+        panel.addSubview_(scroll)
+        self.label(panel, "记录在本机保存，推理时发送给所选模型服务。", 18, 5, 500, 18, 10, PALETTE["muted"])
+        self.history_menu = A.NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(546, 0, 126, 28), True)
+        self.history_menu.setFont_(A.NSFont.systemFontOfSize_(11))
+        self.history_menu.addItemsWithTitles_(["管理记录", "清空所选会话记录", "清空全部记录"])
+        self.history_menu.menu().setAutoenablesItems_(False)
+        self.history_menu.setToolTip_("清空立即生效，保留聊天背景。")
+        for index, action in enumerate(("clearCurrentHistory:", "clearAllHistory:"), 1):
+            entry = self.history_menu.itemAtIndex_(index)
+            entry.setTarget_(self)
+            entry.setAction_(action)
+        panel.addSubview_(self.history_menu)
+        item.setView_(panel)
+        self.tabs.addTabViewItem_(item)
+
+    @objc.python_method
+    def refresh_contexts(self):
+        drafts = self.changed_backgrounds()
+        store = self.hud.reload_conversations() if self.hud else None
+        data = store.data if store is not None else {}
+        current = ((self.hud._last_full or {}).get("chat_title") or "") if self.hud else ""
+        drafts = {title: text for title, text in drafts.items()
+                  if text != data.get(title, {}).get('background', '')}
+        titles = sorted(set(data) | set(drafts) | ({current} if current else set())) if store is not None else []
+        selected = self.context_title if self.context_title in titles else current
+        self.background_initial = {title: data.get(title, {}).get('background', '') for title in titles}
+        self.background_drafts = drafts
+        # Untouched cached text is not a draft and must not revive an externally deleted background.
+        self.context_title = ""
+        self.context_picker.removeAllItems()
+        self.context_picker.addItemsWithTitles_(titles or ["暂无已保存的会话"])
+        if selected in titles:
+            self.context_picker.selectItemWithTitle_(selected)
+        self.context_picker.setEnabled_(bool(titles))
+        self.background_editor.setEditable_(bool(titles))
+        self.selectContext_(self.context_picker)
+        self.history_menu.setEnabled_(store is not None and not store.error)
+        self.history_menu.itemAtIndex_(1).setEnabled_(bool(titles))
+        self.history_menu.itemAtIndex_(2).setEnabled_(store is not None)
+        error = store.error if store is not None else ""
+        if error:
+            self.set_status(error, "error")
+        elif getattr(self, '_context_error', ''):
+            self.set_status("本地会话文件已恢复。" + ("背景草稿仍需点击「保存配置」。" if drafts else ""))
+        self._context_error = error
+
+    def windowDidBecomeKey_(self, notification):
+        self.refresh_contexts()
+
+    def selectContext_(self, sender):
+        if self.context_title:
+            self.background_drafts[self.context_title] = str(self.background_editor.string())
+        self.context_title = str(sender.titleOfSelectedItem()) if sender.isEnabled() else ""
+        self.background_editor.setString_(self.background_drafts.get(
+            self.context_title, self.background_initial.get(self.context_title, "")))
+
+    @objc.python_method
+    def changed_backgrounds(self):
+        if self.context_title:
+            self.background_drafts[self.context_title] = str(self.background_editor.string())
+        return {title: text for title, text in self.background_drafts.items()
+                if text != self.background_initial[title]}
+
+    def contextControlChanged_(self, sender):
+        self.set_status("会话记录与背景已修改，点击「保存配置」后生效。")
+
+    def textDidChange_(self, notification):
+        self.contextControlChanged_(None)
+
+    def clearCurrentHistory_(self, sender):
+        self.context_action("current")
+
+    def clearAllHistory_(self, sender):
+        self.context_action("all")
+
+    @objc.python_method
+    def context_action(self, action):
+        try:
+            self.hud.clear_history(self.context_title if action == "current" else None)
+        except (OSError, ValueError):
+            self.set_status((self.hud.conversations.error if self.hud.conversations else "")
+                            or "保存失败，请检查本地数据权限及可用磁盘空间。", "error")
+            return
+        self.refresh_contexts()
+        self.set_status("记录已清空，背景保留；后续有效读屏按开关继续记录。", "success")
 
     @objc.python_method
     def set_status(self, text, kind="info"):
@@ -293,6 +455,7 @@ class SettingsController(NSObject):
 
     @objc.python_method
     def show(self):
+        self.refresh_contexts()
         self.window.makeKeyAndOrderFront_(None)
         A.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
@@ -302,11 +465,18 @@ class SettingsController(NSObject):
 
     @objc.python_method
     def changed(self):
-        return {f"{p}_{k}": v for p in config.PREFIXES for k, v in self.values(p).items()
-                if v != self.initial[f"{p}_{k}"]}
+        values = {f"{p}_{k}": v for p in config.PREFIXES for k, v in self.values(p).items()}
+        if self.history_switch.isEnabled():
+            values["JEV_HISTORY"] = "1" if self.history_switch.state() == A.NSOnState else "0"
+        if self.context_count.isEnabled():
+            values["JEV_CONTEXT_MESSAGES"] = str(self.context_count.stringValue()).strip()
+        return {k: v for k, v in values.items() if v != self.initial[k]}
 
     def controlTextDidChange_(self, notification):
         field = notification.object()
+        if field == self.context_count:
+            self.contextControlChanged_(field)
+            return
         for fields in self.fields.values():
             if field in (fields["API_KEY"], fields["BASE_URL"]):
                 combo = fields["MODEL"]
@@ -314,10 +484,14 @@ class SettingsController(NSObject):
         self.set_status("配置已修改，请重新测试；保存后重启生效。")
 
     def saveSettings_(self, sender):
+        from chat_context import message_limit
         self.window.makeFirstResponder_(None)
+        self.refresh_contexts()
         changes = self.changed()
-        if not changes:
-            self.set_status("没有需要保存的修改。")
+        backgrounds = self.changed_backgrounds()
+        if not changes and not backgrounds:
+            if not self._context_error:
+                self.set_status("没有需要保存的修改。")
             return
         # Persist missing displayed defaults for edited services, but keep untouched key lines.
         for prefix in config.PREFIXES:
@@ -333,7 +507,8 @@ class SettingsController(NSObject):
             for key, value in changes.items():
                 if key.endswith("_BASE_URL") and value:
                     config.validate_endpoint(value)
-            self.original = config.write_settings(self.path, self.original, changes)
+            if changes:
+                self.original = config.write_settings(self.path, self.original, changes)
         except ValueError as e:
             self.set_status(str(e), "error")
             return
@@ -342,7 +517,31 @@ class SettingsController(NSObject):
             return
         self.initial.update(changes)
         self.file_values.update(changes)
-        self.set_status("已保存。请退出并重新打开应用；当前会话继续使用启动时的配置。", "success")
+        context_changes = {k: v for k, v in changes.items() if k in ("JEV_HISTORY", "JEV_CONTEXT_MESSAGES")}
+        for key, value in context_changes.items():
+            userconfig.session_override(key, value)
+        if context_changes and self.hud:
+            try:
+                effective_count = message_limit(userconfig.get("JEV_CONTEXT_MESSAGES") or "20")
+            except ValueError:
+                effective_count = 20
+            self.hud.configure_context(userconfig.get("JEV_HISTORY") == "1", str(effective_count))
+        saved = bool(changes)
+        try:
+            for title, text in backgrounds.items():
+                self.hud.save_background(title, text)
+                self.background_initial[title] = text
+                saved = True
+        except (ValueError, OSError):
+            self.set_status(("部分配置已保存；" if saved else "保存失败；")
+                            + ((self.hud.conversations.error if self.hud.conversations else "")
+                               or "请检查本地数据权限或磁盘空间后重试。") + "背景草稿仍保留。", "error")
+            return
+        model_changes = changes.keys() - context_changes.keys()
+        if model_changes and not (context_changes or backgrounds):
+            self.set_status("已保存。请退出并重新打开应用；当前会话继续使用启动时的配置。", "success")
+        else:
+            self.set_status("会话记录与背景已保存并生效。" + ("模型配置需退出并重新打开应用。" if model_changes else ""), "success")
 
     def fetchModels_(self, sender):
         self.start_request(sender.tag(), True)
@@ -414,7 +613,7 @@ class SettingsController(NSObject):
         if self.busy:
             self.set_status("请求进行中，请等待结果后关闭。")
             return False
-        if self.changed():
+        if self.changed() or self.changed_backgrounds():
             alert = A.NSAlert.alloc().init()
             alert.setMessageText_("放弃尚未保存的配置？")
             alert.addButtonWithTitle_("继续编辑")

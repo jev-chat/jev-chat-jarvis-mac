@@ -76,6 +76,7 @@ from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 import ui_style  # noqa: E402
+import chat_context
 
 PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
 COLLAPSED_H = 96              # height when the panel is rolled up
@@ -96,8 +97,6 @@ SETTLE_S = 1.2           # upper bound on the settle wait (anti-flood; unchanged
 EARLY_SETTLE_S = 0.70    # the gate may open this early …
 STABLE_READS = 3         # … but only after this many consecutive unchanged reads
 MIN_GAP_S = 2.0          # never restart analysis faster than this
-CONTEXT_TURNS = 4        # recent turns the generation half sees
-JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, faster forward
 IDLE_STATUS = "等待微信消息…"       # the resting status line (also set at build time)
 WARM_STATUS = "判断模型加载中…（首次需下载，可能数分钟）"  # shown while judge warm-up runs
 
@@ -190,6 +189,22 @@ class HudController(NSObject):
         self._reply_key = None         # (conversation, incoming text), never an outgoing message
         self._reply_epoch = 0          # invalidate even if the same text reappears later
         self._reply_worker = threading.local()
+        self._active_context = None
+        self._context_lock = threading.RLock()
+        self._context_version = 0
+        self.history_enabled = userconfig.get("JEV_HISTORY") == "1"
+        try:
+            self.context_limit = chat_context.message_limit(userconfig.get("JEV_CONTEXT_MESSAGES") or "20")
+        except ValueError:
+            self.context_limit = 20
+            _log("上下文条数配置无效，使用默认值 20")
+        self._observed_messages = None
+        self._observed_offset = 0
+        self.conversations = None
+        try:
+            self.conversations = chat_context.Conversations()
+        except (OSError, ValueError):
+            _log("本地会话数据读取失败，历史和背景暂不可用")
         self.last_change_ts = 0.0      # when it last changed (burst detection)
         self.last_analyze_ts = 0.0     # rate limit for analysis starts
         self.analyzed_text = None      # what the panel currently shows
@@ -707,7 +722,7 @@ class HudController(NSObject):
             self.settings_controller.show()
             return
         try:
-            self.settings_controller = SettingsController.alloc().init().build()
+            self.settings_controller = SettingsController.alloc().init().build(self)
             self.settings_controller.show()
         except OSError:
             alert = AppKit.NSAlert.alloc().init()
@@ -1075,6 +1090,12 @@ class HudController(NSObject):
         if picked == self.slot_tones:
             return
         self.slot_tones = picked
+        self._reply_epoch += 1
+        self._gen_epoch += 1
+        self._prejudge_req = self._prejudge_result = None
+        self._pregen_req = self._pregen_result = None
+        if not self.analyzed_text:
+            self.last_seen = None
         # the panel is sized by how many slots are in use, so re-lay-out *before* the new
         # candidates arrive: the empty rows appear at once and nothing jumps later
         self._clear_candidates()
@@ -1128,7 +1149,11 @@ class HudController(NSObject):
         if intent and texts:
             try:
                 with self._model_lock:   # never two local forwards at once
-                    ranked = self.judge.rank_candidates(message, intent, texts)
+                    if not self._reply_current():
+                        return payload
+                    context = getattr(self._reply_worker, "context", self._active_context)
+                    ranked = self.judge.rank_candidates(
+                        chat_context.model_message(message, context), intent, texts, context=context)
                 scores = {r["text"]: r["prob"] for r in ranked}
             except Exception:
                 scores = {}
@@ -1170,15 +1195,17 @@ class HudController(NSObject):
         try:
             if not self._reply_current():
                 return
-            gen = self.generator.generate(text, intent, slot_tones, None,
+            context = getattr(self._reply_worker, "context", self._active_context)
+            gen = self.generator.generate(chat_context.model_message(text, context), intent, slot_tones,
+                                          context,
                                           self._stream_hook(t0, "换话术"))
             groups = gen.get("groups") or []
-            failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+            failed = [str(g["slot"]) for g in groups if g.get("error")]
             _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
                  + (f" · 失败: {'; '.join(failed)}" if failed else ""))
             payload = self._payload_from_gen(gen)
             if payload is None:
-                err = (gen.get("error") or "空结果")[:60]
+                err = "服务未返回可用候选，请检查模型设置"
                 _log(f"换话术无可用候选: {err}")
                 self._push("applyError:", f"候选生成失败: {err}")
                 return
@@ -1189,20 +1216,21 @@ class HudController(NSObject):
             _log(f"换话术 端到端 {(time.perf_counter() - t0) * 1000:.0f}ms")
             self._push("applyTones:", ranked)
         except Exception as e:
-            _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
+            _log(f"换话术失败 {type(e).__name__}")
+            self._push("applyError:", f"换话术失败: {type(e).__name__}")
 
     @objc.python_method
-    def _regenerate_work(self, text: str, intent: str, slot_tones: list[str], context):
+    def _regenerate_work(self, text: str, intent: str, slot_tones: list[str]):
         """Refresh candidate replies atomically, without re-reading or re-judging."""
         t0 = time.perf_counter()
         try:
             if not self._reply_current():
                 return
-            gen = self.generator.generate(text, intent, slot_tones, context)
+            context = getattr(self._reply_worker, "context", self._active_context)
+            gen = self.generator.generate(chat_context.model_message(text, context), intent, slot_tones, context)
             payload = self._payload_from_gen(gen)
             if payload is None:
-                err = (gen.get("error") or "空结果")[:60]
+                err = "服务未返回可用候选，请检查模型设置"
                 _log(f"重新生成无可用候选: {err}")
                 self._push("applyError:", f"重新生成失败: {err}")
                 return
@@ -1211,8 +1239,8 @@ class HudController(NSObject):
                  f"{sum(len(items) for _s, _t, items in ranked)} 条候选")
             self._push("applyRegenerated:", ranked)
         except Exception as e:
-            _log(f"重新生成失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"重新生成失败: {type(e).__name__}: {str(e)[:40]}")
+            _log(f"重新生成失败 {type(e).__name__}")
+            self._push("applyError:", f"重新生成失败: {type(e).__name__}")
         finally:
             self._regenerating = False
 
@@ -1272,14 +1300,13 @@ class HudController(NSObject):
         if not active:
             self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
             return
-        context = self._context_text(messages, newest)
         self._regenerating = True
         self._set_candidate_header("候选回复 · 重新生成中…")
         self._render("status", "重新生成推荐回答…", PALETTE["muted"])
-        _log(f"重新生成推荐回答 · 已请求 · 消息={text[:40]}")
+        _log("重新生成推荐回答 · 已请求")
         threading.Thread(target=self._reply_task,
                          args=(self._reply_epoch, self._regenerate_work,
-                               text, self._last_intent, list(self.slot_tones), context),
+                               text, self._last_intent, list(self.slot_tones)),
                          daemon=True).start()
 
     def collapsePanel_(self, sender):
@@ -1457,6 +1484,7 @@ class HudController(NSObject):
 
     @objc.python_method
     def _work_inner(self):
+        self.reload_conversations()
         # The panel is a global floating window. Showing it over Chrome while continuing
         # to reuse the last WeChat frame makes stale text look like browser OCR. Treat app
         # activation as a hard display/capture boundary before even checking permissions:
@@ -1480,12 +1508,13 @@ class HudController(NSObject):
             self._next_read_ts = time.time() + SLOW_TICK
             return
         capture_foreground_epoch = self._foreground_epoch
+        capture_context_version = self._context_version
         try:
             res = read_conversation(previous_wid=self._win_wid,
                                     prev_fingerprint=self._fingerprint,
                                     prev_layout=getattr(self, "_layout_key", None))
         except Exception as e:
-            self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
+            self._push("applyError:", f"读取失败: {type(e).__name__}")
             self._next_read_ts = time.time() + SLOW_TICK
             return
         # Re-check after the blocking capture/OCR.  tick_ may have observed a
@@ -1556,6 +1585,7 @@ class HudController(NSObject):
         live_input_rect = res.get("input_rect")
         self._win_wid = res["window"]["wid"]
         self._push("applyPosition:", res["window"])
+        fresh_frame = not res["unchanged"]
         if res["unchanged"] and self._last_full is not None:
             # the settle/analyze gate below still runs every read; an unchanged frame
             # just skips re-deriving the messages it would act on
@@ -1587,10 +1617,11 @@ class HudController(NSObject):
                     if last_thems:
                         self._reply_epoch += 1
                         self.analyzed_text = None   # let the settle gate re-open
-                        self._enqueue_prework(last_thems[-1], last_msgs,
+                        self._enqueue_prework(last_thems[-1], self._active_context,
                                               last_thems[-2].text
                                               if len(last_thems) > 1 else "")
                 res = self._last_full
+                fresh_frame = False
         else:
             self._empty_frame_since = None
             self._last_full = res
@@ -1611,109 +1642,126 @@ class HudController(NSObject):
                     self._input_target["chat_signature"] = chat_signature(res["window"], self._input_target["visual_rect"])
             self._input_window = dict(res["window"])
             self._input_next = now_input + 1.0
-        msgs = res["messages"]
-        thems = [m for m in msgs if m.side == "them"]
-        newest = thems[-1] if thems else None
-        prev_text = thems[-2].text if len(thems) > 1 else ""
+        with self._context_lock:
+            self.reload_conversations()
+            if capture_context_version != self._context_version:
+                self._fingerprint = None
+                self._last_full = None
+                return
+            msgs = res["messages"]
+            visible = [(m.text, m.side, m.sender or "") for m in msgs]
+            self._observed_messages, self._observed_offset = visible, 0
+            if self.history_enabled and self.conversations and not self.conversations.error:
+                try:
+                    self._observed_messages, self._observed_offset = self.conversations.observe(
+                        res.get("chat_title"), visible, record=fresh_frame)
+                except (OSError, ValueError):
+                    _log("保存会话历史失败，使用当前画面继续分析")
+                    self._push("applyError:", "会话历史保存失败，请检查磁盘空间及权限")
+            thems = [m for m in msgs if m.side == "them"]
+            newest = thems[-1] if thems else None
+            prev_text = thems[-2].text if len(thems) > 1 else ""
 
-        key = (res.get("chat_title") or "", newest.text) if newest else None
-        if key != self._reply_key:
-            self._reply_epoch += 1
-            self._reply_key = key
-            self.last_seen = None
-            self.analyzed_text = None
-            self._prejudge_req = self._prejudge_result = None
-            self._pregen_req = self._pregen_result = None
-            self._gen_epoch += 1
+            context = self._context_text(msgs, newest) if newest else None
+            key = (res.get("chat_title") or "", newest.text, context, tuple(visible)) if newest else None
+            self._active_context = context
+            if key != self._reply_key:
+                self._reply_epoch += 1
+                self._reply_key = key
+                self.last_seen = None
+                self.analyzed_text = None
+                self._prejudge_req = self._prejudge_result = None
+                self._pregen_req = self._pregen_result = None
+                self._gen_epoch += 1
 
-        # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
-        # the cached messages, so the boxes stay up even while the pane is quiet
-        if self._show_boxes:
-            self._push("applyBoxes:", (res["window"], msgs,
-                                       newest.text if newest else None))
-        if newest is None:
-            self._push("applyWaiting:", "暂未确认输入区边界，暂停分析"
-                       if res.get("input_unresolved") else None)
-            return
-        now = time.time()
+            # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
+            # the cached messages, so the boxes stay up even while the pane is quiet
+            if self._show_boxes:
+                self._push("applyBoxes:", (res["window"], msgs,
+                                           newest.text if newest else None))
+            if newest is None:
+                self._push("applyWaiting:", "暂未确认输入区边界，暂停分析"
+                           if res.get("input_unresolved") else None)
+                return
+            now = time.time()
 
-        # --- anti-flood: track arrivals, never analyze mid-burst
-        if newest.text != self.last_seen:
-            self.last_seen = newest.text
-            self.last_change_ts = now
-            # only on arrival: this function runs every second, and a per-tick line would
-            # bury the timing that matters
-            t = res.get("timing_ms") or {}
-            first_read = not self._read_once
-            self._read_once = True
-            # Vision loads on the first call and costs ~2x steady state; saying so keeps a
-            # one-off from being read as a regression (same reason the judge line does it)
-            note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
-            # say when the fast in-process capture was refused: otherwise a permanent
-            # fallback looks like ordinary slowness instead of something to report
-            slow_cap = " · 抓屏走了子进程（进程内被抓图接口拒绝）" \
-                if t.get("capture_path") == "subprocess" else ""
-            _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
-                 f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
-                 f"{note}{slow_cap}")
-            _log(f"新消息 · 预判+生成先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
-                 f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
-            # latest-wins: overwrite the slot, retire the old verdict — only the newest
-            # text's judgment can ever be consumed, and only by the settle gate below
-            self._enqueue_prework(newest, msgs, prev_text)
-            # keep the previous verdict readable; just badge that something new landed
-            self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
+            # --- anti-flood: track arrivals, never analyze mid-burst
+            if newest.text != self.last_seen:
+                self.last_seen = newest.text
+                self.last_change_ts = now
+                # only on arrival: this function runs every second, and a per-tick line would
+                # bury the timing that matters
+                t = res.get("timing_ms") or {}
+                first_read = not self._read_once
+                self._read_once = True
+                # Vision loads on the first call and costs ~2x steady state; saying so keeps a
+                # one-off from being read as a regression (same reason the judge line does it)
+                note = "（首次，含 Vision 加载）" if first_read and t.get("ocr", 0) > 400 else ""
+                # say when the fast in-process capture was refused: otherwise a permanent
+                # fallback looks like ordinary slowness instead of something to report
+                slow_cap = " · 抓屏走了子进程（进程内被抓图接口拒绝）" \
+                    if t.get("capture_path") == "subprocess" else ""
+                _log(f"读屏 抓取 {t.get('capture', 0):.0f}ms + OCR {t.get('ocr', 0):.0f}ms"
+                     f" = {t.get('total', 0):.0f}ms · 读到 {len(msgs)} 条（对方 {len(thems)} 条）"
+                     f"{note}{slow_cap}")
+                _log(f"新消息 · 预判+生成先跑，停稳 {SETTLE_S}s（连续 {STABLE_READS} 跳不变最早 "
+                     f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
+                # latest-wins: overwrite the slot, retire the old verdict — only the newest
+                # text's judgment can ever be consumed, and only by the settle gate below
+                self._enqueue_prework(newest, context, prev_text)
+                # keep the previous verdict readable; just badge that something new landed
+                self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
 
-        # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
-        # content-stability early open — the pane went quiet for STABLE_READS consecutive
-        # reads spanning at least EARLY_SETTLE_S, which is itself evidence the burst is
-        # over. A burst keeps resetting _stable_n, so mid-burst opens cannot happen.
-        elapsed = now - self.last_change_ts
-        settled = elapsed >= SETTLE_S or (elapsed >= EARLY_SETTLE_S
-                                          and self._stable_n >= STABLE_READS)
-        cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
-        pr = self._prejudge_result
-        pre_hit = pr is not None and pr[0] == newest.text and pr[4] == self._reply_epoch
-        # A pre-judged verdict needs no cooling: its cost was already paid per arrival.
-        # Only the full path (no usable pre-judgment) still waits MIN_GAP_S out.
-        if (newest.text != self.analyzed_text and settled and not self._analyzing
-                and not self._prejudging and (pre_hit or cooled)):
-            self.last_analyze_ts = now
-            self.analyzed_text = newest.text
-            self._prejudge_result = None      # spent: a verdict is shown exactly once
-            self._analyzing = True
-            if pre_hit:
-                # Judgment already ran inside the settle window; go straight to the
-                # verdict on screen and start only the generation half.
-                _log(f"停稳 · 用预判结论上屏 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyJudgment:", (pr[1], pr[2], pr[3]))
-                threading.Thread(target=self._reply_task,
-                                 args=(self._reply_epoch, self._run_generation,
-                                       newest, msgs, pr[1]), daemon=True).start()
+            # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
+            # content-stability early open — the pane went quiet for STABLE_READS consecutive
+            # reads spanning at least EARLY_SETTLE_S, which is itself evidence the burst is
+            # over. A burst keeps resetting _stable_n, so mid-burst opens cannot happen.
+            elapsed = now - self.last_change_ts
+            settled = elapsed >= SETTLE_S or (elapsed >= EARLY_SETTLE_S
+                                              and self._stable_n >= STABLE_READS)
+            cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
+            pr = self._prejudge_result
+            pre_hit = pr is not None and pr[0] == newest.text and pr[4] == self._reply_epoch
+            # A pre-judged verdict needs no cooling: its cost was already paid per arrival.
+            # Only the full path (no usable pre-judgment) still waits MIN_GAP_S out.
+            if (newest.text != self.analyzed_text and settled and not self._analyzing
+                    and not self._prejudging and (pre_hit or cooled)):
+                self.last_analyze_ts = now
+                self.analyzed_text = newest.text
+                self._prejudge_result = None      # spent: a verdict is shown exactly once
+                self._analyzing = True
+                if pre_hit:
+                    # Judgment already ran inside the settle window; go straight to the
+                    # verdict on screen and start only the generation half.
+                    _log(f"停稳 · 用预判结论上屏 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+                    self._push("applyJudgment:", (pr[1], pr[2], pr[3]))
+                    threading.Thread(target=self._reply_task,
+                                     args=(self._reply_epoch, self._run_generation,
+                                           newest, msgs, pr[1]), daemon=True).start()
+                else:
+                    _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
+                    self._push("applyPending:", (newest.text, newest.sender, prev_text))
+                    # off the tick path on purpose: judge+generate+rank takes over a second, and
+                    # while it runs the loop must keep reading — a message landing mid-analysis
+                    # used to wait the whole analysis out before anyone even saw it
+                    threading.Thread(target=self._reply_task,
+                                     args=(self._reply_epoch, self._run_analysis,
+                                           newest, msgs, prev_text), daemon=True).start()
+            elif newest.text != self.analyzed_text:
+                # the wait is deliberate; say so once per arrival change so "it feels slow" can
+                # be told apart from "it is still waiting out the burst window"
+                why = ("消息还在变" if not settled else
+                       "上一条还在分析" if self._analyzing else
+                       "预判还在跑" if self._prejudging else
+                       f"距上次分析不足 {MIN_GAP_S}s")
+                if self._last_skip_reason != why:
+                    self._last_skip_reason = why
+                    _log(f"暂不分析（{why}）")
             else:
-                _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyPending:", (newest.text, newest.sender, prev_text))
-                # off the tick path on purpose: judge+generate+rank takes over a second, and
-                # while it runs the loop must keep reading — a message landing mid-analysis
-                # used to wait the whole analysis out before anyone even saw it
-                threading.Thread(target=self._reply_task,
-                                 args=(self._reply_epoch, self._run_analysis,
-                                       newest, msgs, prev_text), daemon=True).start()
-        elif newest.text != self.analyzed_text:
-            # the wait is deliberate; say so once per arrival change so "it feels slow" can
-            # be told apart from "it is still waiting out the burst window"
-            why = ("消息还在变" if not settled else
-                   "上一条还在分析" if self._analyzing else
-                   "预判还在跑" if self._prejudging else
-                   f"距上次分析不足 {MIN_GAP_S}s")
-            if self._last_skip_reason != why:
-                self._last_skip_reason = why
-                _log(f"暂不分析（{why}）")
-        else:
-            self._last_skip_reason = None
+                self._last_skip_reason = None
 
     @objc.python_method
-    def _enqueue_prework(self, newest, msgs, prev_text):
+    def _enqueue_prework(self, newest, context, prev_text):
         """Queue the prejudge + pregen halves at the current reply epoch (latest-wins).
 
         Fired on arrival and re-fired when an empty-OCR frame retires the in-flight
@@ -1722,11 +1770,11 @@ class HudController(NSObject):
         dropdown click during the window invalidates the result at consumption time
         (checked in _take_pregen).
         """
-        self._prejudge_req = (newest.text, self._context_text(msgs, newest, JUDGE_TURNS),
+        self._prejudge_req = (newest.text, context,
                               newest.sender, prev_text, self._reply_epoch)
         self._prejudge_result = None
         self._prejudge_event.set()
-        self._pregen_req = (newest.text, self._context_text(msgs, newest),
+        self._pregen_req = (newest.text, context,
                             tuple(self.slot_tones), self._reply_epoch)
         self._pregen_result = None
         self._pregen_event.set()
@@ -1738,8 +1786,8 @@ class HudController(NSObject):
                 return
             self._analyze(newest, msgs, prev_text)
         except Exception as e:
-            _log(f"分析失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
+            _log(f"分析失败 {type(e).__name__}")
+            self._push("applyError:", f"分析失败: {type(e).__name__}")
         finally:
             self._analyzing = False
 
@@ -1763,13 +1811,17 @@ class HudController(NSObject):
                 if req is None:
                     continue
                 text, context, sender, prev, epoch = req
+                self.reload_conversations()
                 if self._paused or text != self.last_seen or epoch != self._reply_epoch:
                     continue          # superseded while queued: only the newest text counts
                 self._prejudging = True
                 try:
                     t0 = time.perf_counter()
                     with self._model_lock:
-                        verdict = self.judge.judge(text, context=context)
+                        self.reload_conversations()
+                        if epoch != self._reply_epoch or self._paused:
+                            continue
+                        verdict = self.judge.judge(chat_context.model_message(text, context), context=context)
                     ms = (time.perf_counter() - t0) * 1000
                     first = not self._judged_once
                     self._judged_once = True
@@ -1778,10 +1830,11 @@ class HudController(NSObject):
                          f" 把握 {verdict.get('confidence', 0):.0%}"
                          f" 风险 {verdict.get('risk', '?')}{note}（待停稳上屏）")
                 except Exception as e:
-                    _log(f"预判失败 {type(e).__name__}: {str(e)[:60]}")
+                    _log(f"预判失败 {type(e).__name__}")
                     verdict = None
                 finally:
                     self._prejudging = False
+                self.reload_conversations()
                 if (verdict is not None and not self._paused and text == self.last_seen
                         and epoch == self._reply_epoch):
                     self._prejudge_result = (text, verdict, sender, prev, epoch)
@@ -1806,16 +1859,18 @@ class HudController(NSObject):
                 if req is None:
                     continue
                 text, context, tones, epoch = req
+                self.reload_conversations()
                 if self._paused or text != self.last_seen or epoch != self._reply_epoch:
                     continue          # superseded while queued: only the newest text counts
                 self._pregen_running = True
                 gen = None
                 try:
-                    gen = self.generator.generate(text, "", list(tones), context)
+                    gen = self.generator.generate(chat_context.model_message(text, context), "", list(tones), context)
                 except Exception:
                     gen = None        # a failed early run just means the settle path regenerates
                 # store BEFORE clearing _pregen_running, so _take_pregen never observes
                 # "not running" without the result already visible
+                self.reload_conversations()
                 if (gen is not None and not self._paused and text == self.last_seen
                         and epoch == self._reply_epoch):
                     self._pregen_result = (text, tones, gen, epoch)
@@ -1862,7 +1917,7 @@ class HudController(NSObject):
         if not self._reply_current():
             return {"groups": []}
         if gen is None:
-            gen = self.generator.generate(text, "", list(tones), context, on_candidate)
+            gen = self.generator.generate(chat_context.model_message(text, context), "", list(tones), context, on_candidate)
         return gen
 
     @objc.python_method
@@ -1885,38 +1940,85 @@ class HudController(NSObject):
                 return
             note = f"（早跑命中，停稳后仅等 {wait_ms:.0f}ms）" if gen is not None else ""
             if gen is None:
-                gen = self.generator.generate(newest.text, "", list(self.slot_tones),
+                gen = self.generator.generate(chat_context.model_message(newest.text, context), "", list(self.slot_tones),
                                               context, self._stream_hook(t0))
             self._finish_generate(gen, newest, t0, verdict, note)
         except Exception as e:
-            _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
+            _log(f"生成失败 {type(e).__name__}")
+            self._push("applyError:", f"候选生成失败: {type(e).__name__}")
         finally:
             self._analyzing = False
 
     @objc.python_method
-    def _context_text(self, msgs, newest, turns: int = CONTEXT_TURNS) -> str | None:
-        """The last few turns, each prefixed with who said it — shared by both halves.
+    def reload_conversations(self):
+        with self._context_lock:
+            store = self.conversations
+            if store is not None:
+                store.reload()
+                if store.revision != getattr(self, '_conversation_revision', 0):
+                    self._conversation_revision = store.revision
+                    self._context_changed()
+                    if store.error:
+                        _log(store.error)
+                        self._push_reply("applyError:", store.error, self._reply_epoch)
+            return store
 
-        The names are the point. The judge used to receive a jumble of lines with no
-        speaker, which in a group chat throws away the most useful clue available: who is
-        talking, and whether the last thing said was mine. One-to-one chats render no name
-        above the bubble, so 我/对方 stands in.
+    @objc.python_method
+    def _context_changed(self):
+        self._context_version += 1
+        self._reply_epoch += 1
+        self._gen_epoch += 1
+        self._reply_key = None
+        self.last_seen = self.analyzed_text = None
+        self._prejudge_req = self._prejudge_result = None
+        self._pregen_req = self._pregen_result = None
+        self._active_context = None
+        self._observed_messages = None
+        self._observed_offset = 0
+        self._fingerprint = None
+        self._next_read_ts = 0
+        self._push_reply("applyWaiting:", None, self._reply_epoch)
 
-        The halves take different depths: generation needs the conversational thread
-        (CONTEXT_TURNS), while the judge's prompt is paid per forward — two turns carry
-        most of the signal at roughly half the added prefill (JUDGE_TURNS).
+    @objc.python_method
+    def save_background(self, title, text):
+        with self._context_lock:
+            self.reload_conversations()
+            if self.conversations is None:
+                raise OSError("会话存储不可用")
+            self.conversations.save_background(title, text)
+            if title == (self._last_full or {}).get("chat_title"):
+                self._context_changed()
 
-        The message under judgment is excluded **by identity**, not by position: `newest` is
-        the last message from the other side, which is not the same as the last element of
-        `msgs` (my own replies come after it).
-        """
-        prior = [m for m in msgs if m is not newest][-turns:]
-        if not prior:
-            return None
-        return "\n".join(
-            f"{m.sender or {'me': '我', 'them': '对方'}.get(m.side, '方向未确认')}: {m.text}"
-            for m in prior)
+    @objc.python_method
+    def configure_context(self, enabled, limit):
+        count = chat_context.message_limit(limit)
+        with self._context_lock:
+            if (self.history_enabled, self.context_limit) != (enabled, count):
+                self.history_enabled, self.context_limit = enabled, count
+                self._context_changed()
+
+    @objc.python_method
+    def clear_history(self, title=None):
+        with self._context_lock:
+            self.reload_conversations()
+            if self.conversations is None:
+                raise OSError("会话存储不可用")
+            self.conversations.clear_history(title)
+            self._context_changed()
+
+    @objc.python_method
+    def _context_text(self, msgs, newest) -> str | None:
+        if hasattr(self._reply_worker, "context"):
+            return self._reply_worker.context
+        with self._context_lock:
+            store = self.reload_conversations()
+            title = (self._last_full or {}).get("chat_title")
+            return chat_context.context_text(
+                self._observed_messages if self._observed_messages is not None else
+                [(m.text, m.side, m.sender or "") for m in msgs],
+                self._observed_offset + next(i for i, m in enumerate(msgs) if m is newest),
+                limit=self.context_limit,
+                background=store.data.get(title, {}).get('background', '') if store else "")
 
     @objc.python_method
     def _analyze(self, newest, msgs, prev_text: str = ""):
@@ -1940,8 +2042,10 @@ class HudController(NSObject):
             t_judge = time.perf_counter()
             try:
                 with self._model_lock:   # never two local forwards at once
+                    if not self._reply_current():
+                        return
                     verdict = self.judge.judge(
-                        newest.text, context=self._context_text(msgs, newest, JUDGE_TURNS))
+                        chat_context.model_message(newest.text, context), context=context)
                 ms = (time.perf_counter() - t_judge) * 1000
                 first = not self._judged_once
                 self._judged_once = True
@@ -1957,17 +2061,17 @@ class HudController(NSObject):
                 # ways out, see judge.low_memory_reason and judge.download_block_reason);
                 # the generic formatting below truncates at 40 chars and would cut the
                 # "TYPESAFE_API_KEY" line in half — README promises the hint.
-                _log(f"判断被拒 {type(e).__name__}: {str(e)[:60]}")
+                _log(f"判断被拒 {type(e).__name__}")
                 self._push("applyError:", str(e))
             except Exception as e:
-                _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
-                self._push("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}")
+                _log(f"判断失败 {type(e).__name__}")
+                self._push("applyError:", f"判断失败: {type(e).__name__}")
 
             try:
                 gen = gen_future.result()
             except Exception as e:
-                _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
-                self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
+                _log(f"生成失败 {type(e).__name__}")
+                self._push("applyError:", f"候选生成失败: {type(e).__name__}")
                 return
             self._finish_generate(gen, newest, t0, verdict)
 
@@ -1988,14 +2092,14 @@ class HudController(NSObject):
         if not self._reply_current():
             return
         groups = gen.get("groups") or []
-        failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
+        failed = [str(g["slot"]) for g in groups if g.get("error")]
         _log(f"生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms{note} · {len(groups)} 个话术并发"
              f" → {sum(len(g['texts']) for g in groups)} 条候选"
              + (f" · 失败: {'; '.join(failed)}" if failed else ""))
         intent = verdict["intent"] if verdict else ""
         payload = self._payload_from_gen(gen)
         if payload is None:
-            err = (gen.get("error") or "空结果")[:60]
+            err = "服务未返回可用候选，请检查模型设置"
             _log(f"生成无可用候选: {err}")
             self._push("applyError:", f"候选生成失败: {err}")
             return
@@ -2014,8 +2118,8 @@ class HudController(NSObject):
     @objc.python_method
     def _push(self, selector: str, payload=None):
         if selector in {"applyIncoming:", "applyPending:", "applyJudgment:",
-                        "applyCandidates:", "applyRegenerated:", "applyStreamLine:",
-                        "applyWaiting:", "applyError:"}:
+                        "applyCandidates:", "applyRegenerated:", "applyTones:",
+                        "applyStreamLine:", "applyWaiting:", "applyError:"}:
             epoch = getattr(self._reply_worker, "epoch", self._reply_epoch)
             self._push_reply(selector, payload, epoch)
             return
@@ -2024,13 +2128,16 @@ class HudController(NSObject):
     @objc.python_method
     def _reply_task(self, epoch, callback, *args):
         self._reply_worker.epoch = epoch
+        self._reply_worker.context = self._active_context
         try:
             return callback(*args)
         finally:
             del self._reply_worker.epoch
+            del self._reply_worker.context
 
     @objc.python_method
     def _reply_current(self):
+        self.reload_conversations()
         return (self._wechat_frontmost is True
                 and self._reply_key is not None and not self._paused
                 and getattr(self._reply_worker, "epoch", self._reply_epoch) == self._reply_epoch)
@@ -2041,6 +2148,7 @@ class HudController(NSObject):
             "applyReplyUpdate:", (epoch, selector, payload), False)
 
     def applyReplyUpdate_(self, update):
+        self.reload_conversations()
         epoch, selector, payload = update
         if self._wechat_frontmost is not True or epoch != self._reply_epoch:
             return
@@ -2328,11 +2436,11 @@ class HudController(NSObject):
             self.judge.warm()
         except (LowMemoryError, ModelNotDownloadedError) as e:
             # Refusal text is written for the user; show it verbatim like applyError does.
-            _log(f"预热判断模型被拒 {type(e).__name__}: {str(e)[:60]}")
+            _log(f"预热判断模型被拒 {type(e).__name__}")
             if local_judge:
                 self._push("applyWarmFailed:", str(e))
         except Exception as e:
-            _log(f"预热判断模型失败 {type(e).__name__}: {str(e)[:60]}")
+            _log(f"预热判断模型失败 {type(e).__name__}")
             if local_judge:
                 self._push("applyWarmFailed:",
                            "判断模型加载失败 · 可配置 TYPESAFE_API_KEY 走云端判断")
@@ -2419,7 +2527,7 @@ class HudController(NSObject):
         except (ValueError, OSError) as e:
             # The session still honours the pick; a failed write just means the dialog
             # asks again next launch.
-            _log(f"首次引导写入 env 失败 {type(e).__name__}: {str(e)[:60]}")
+            _log(f"首次引导写入 env 失败 {type(e).__name__}")
 
 
 def warn_if_no_generation_key() -> None:

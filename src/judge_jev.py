@@ -101,13 +101,13 @@ class JevJudge:
         }
 
     def rank_candidates(self, message: str, intent: str,
-                        candidates: list[str]) -> list[dict]:
+                        candidates: list[str], context: str | None = None) -> list[dict]:
         """Rank reply candidates — just another `choice` question with the texts as options."""
         if not candidates:
             return []
         payload = {
             "model": self.model,
-            "state": f"收到的消息：{message}\n判断出的意图：{intent}",
+            "state": f"{context + chr(10) if context else ''}收到的消息：{message}\n判断出的意图：{intent}",
             "questions": {"best": {"type": "choice",
                                    "instructions": "哪一条回复最合适？",
                                    "criteria": {c: None for c in candidates}}},

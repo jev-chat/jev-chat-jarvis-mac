@@ -2,6 +2,16 @@
 # Shared by start.command and the packaged launcher. Source this file, then call
 # jev_ensure_uv LOG_PATH. Failures leave a user-facing reason in JEV_UV_ERROR.
 
+jev_load_env() {
+    # Let Python load editable context settings from their file, without mistaking
+    # sourced exports for external overrides. Locals restore any inherited values
+    # on return; other settings (including shell/keychain credentials) still export.
+    local JEV_HISTORY JEV_CONTEXT_MESSAGES
+    if [ -f "$1" ]; then
+        . "$1"
+    fi
+}
+
 jev_check_arch() {
     # torch (>=2.14) ships no macOS x86_64 wheel, so an x86_64 process would only
     # die later in `uv sync` with an opaque resolver error (issue #19). Both launch

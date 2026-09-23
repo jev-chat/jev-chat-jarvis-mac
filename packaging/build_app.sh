@@ -99,11 +99,6 @@ mkdir -p "$SUPPORT" "$(dirname "$LOG")"
 # Finder launches have a minimal PATH; add the usual install locations for uv
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# user-level env (API keys). Lives OUTSIDE the repo so it can never be committed, in the
-# one location the README documents — a Finder launch inherits no shell environment at all,
-# so sourcing here is the only chance to pick the keys up before Python also reads them.
-[ -f "$CONFIG/env" ] && source "$CONFIG/env"
-
 log() { print -r -- "[$(date '+%F %T')] $*" >> "$LOG"; }
 
 die() {  # show a native dialog, then exit
@@ -113,6 +108,7 @@ die() {  # show a native dialog, then exit
 }
 
 source "$RES/app/packaging/bootstrap_uv.sh" || die "包内缺少 uv 安装脚本，请重新下载应用"
+jev_load_env "$CONFIG/env"
 if ! jev_check_arch; then
     die "$JEV_ARCH_ERROR"
 fi

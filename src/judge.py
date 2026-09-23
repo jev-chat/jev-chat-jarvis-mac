@@ -393,7 +393,7 @@ class Judge:
         return out.logits[0], slot_token_idx
 
     def rank_candidates(self, message: str, intent: str,
-                        candidates: list[str]) -> list[dict]:
+                        candidates: list[str], context: str | None = None) -> list[dict]:
         """Rank reply candidates by asking which one fits best.
 
         The candidates are the options, so one forward pass yields the distribution the
@@ -401,7 +401,7 @@ class Judge:
         """
         self._load()
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        prompt = f"Context:\n收到：「{message}」\n判断出的意图：{intent}\n\n"
+        prompt = f"Context:\n{context + chr(10) if context else ''}收到：「{message}」\n判断出的意图：{intent}\n\n"
         prompt += "Question: 哪一条回复最合适？\nOptions:\n"
         for i, c in enumerate(candidates):
             prompt += f"({letters[i]}) {c}\n"
@@ -502,19 +502,19 @@ class FallbackJudge:
                 return self.primary.judge(message, context)
             except Exception as e:
                 self.fell_back = True
-                self.reason = f"{type(e).__name__}: {str(e)[:80]}"
+                self.reason = type(e).__name__
         out = self._fallback().judge(message, context)
         out["backend"] = f"local (Jev 不可用: {self.reason})"
         return out
 
-    def rank_candidates(self, message: str, intent: str, candidates: list[str]) -> list[dict]:
+    def rank_candidates(self, message: str, intent: str, candidates: list[str], context: str | None = None) -> list[dict]:
         if not self.fell_back:
             try:
-                return self.primary.rank_candidates(message, intent, candidates)
+                return self.primary.rank_candidates(message, intent, candidates, context)
             except Exception as e:
                 self.fell_back = True
-                self.reason = f"{type(e).__name__}: {str(e)[:80]}"
-        return self._fallback().rank_candidates(message, intent, candidates)
+                self.reason = type(e).__name__
+        return self._fallback().rank_candidates(message, intent, candidates, context)
 
     def warm(self) -> None:
         return None

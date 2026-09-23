@@ -16,6 +16,21 @@ def block(text, top, height=.03, x=.4, width=.15):
 
 
 class DraftExclusionTests(unittest.TestCase):
+    def test_chat_title_ignores_only_trailing_numeric_member_count(self):
+        for raw, expected in [
+            ('项目讨论组（20）', '项目讨论组'),
+            ('项目讨论组(21)', '项目讨论组'),
+            ('项目讨论组 （ ２０ ） ', '项目讨论组'),
+            ('项目讨论组（内部）（20）', '项目讨论组（内部）'),
+            ('项目讨论组（内部）', '项目讨论组（内部）'),
+            ('项目(20)讨论组', '项目(20)讨论组'),
+            ('(20)', ''),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(p.extract_chat_title([block(raw, .04)]), expected)
+        self.assertEqual(p.extract_chat_title([
+            block('项目讨论组', .04), block('(20)', .04, x=.60)]), '项目讨论组')
+
     def test_resized_input_and_straddling_text_are_excluded(self):
         for boundary in (.52, .65, .82):
             messages = p.extract_messages([

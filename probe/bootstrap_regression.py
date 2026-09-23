@@ -81,7 +81,14 @@ cp "$FIXTURE_ROOT/uv" "$HOME/.local/bin/uv"
 chmod +x "$HOME/.local/bin/uv"
 '''
 
-UV = r'''#!/bin/sh
+CONTEXT_PROBE = r'''
+if [ "${CONTEXT_PROBE:-}" = 1 ]; then
+    echo "context=${JEV_HISTORY-unset}:${JEV_CONTEXT_MESSAGES-unset}" >> "$TRACE"
+    [ "${OPENAI_API_KEY:-}" != fixture-key ] || echo 'shell-key-evaluated' >> "$TRACE"
+fi
+'''
+
+UV = '#!/bin/sh\n' + CONTEXT_PROBE + r'''
 echo "uv $*" >> "$TRACE"
 case "$1" in
     --version) echo 'uv 0.0.fixture' ;;
@@ -99,7 +106,7 @@ def write(path, content):
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
-def run_launcher(scenario, source=False):
+def run_launcher(scenario, source=False, context_env=None):
     with tempfile.TemporaryDirectory(prefix="jev-bootstrap-") as td:
         root = Path(td)
         build = (ROOT / "packaging/build_app.sh").read_text(encoding="utf-8")
@@ -116,11 +123,19 @@ def run_launcher(scenario, source=False):
             for dest in (app / "Resources/app/packaging/bootstrap_uv.sh",
                          root / "source/packaging/bootstrap_uv.sh"):
                 write(dest, helper.read_text(encoding="utf-8"))
+        if context_env is not None:
+            write(root / "home/.config/jev-jarvis/env",
+                  'export JEV_HISTORY=1\nexport JEV_CONTEXT_MESSAGES=20\n'
+                  'export OPENAI_API_KEY="$(printf fixture-key)"\n')
         write(root / "installer", INSTALLER)
         write(root / "uv", UV)
-        write(root / "python", '#!/bin/sh\necho app-started >> "$TRACE"\n')
+        write(root / "python", '#!/bin/sh\n' + CONTEXT_PROBE + 'echo app-started >> "$TRACE"\n')
         target = "source/start.command" if source else "jev test.app/Contents/Resources/launcher.zsh"
         env = dict(os.environ, SCENARIO=scenario)
+        if context_env is not None:
+            env.pop('JEV_HISTORY', None)
+            env.pop('JEV_CONTEXT_MESSAGES', None)
+            env.update(context_env, CONTEXT_PROBE='1')
         # Use a relative path so Git Bash and native POSIX shells share the same fixture.
         completed = subprocess.run([SHELL, "-c", PRELUDE, target, target], cwd=root, env=env,
                                    capture_output=True, text=True, encoding="utf-8", timeout=15)
@@ -131,6 +146,17 @@ def run_launcher(scenario, source=False):
 
 
 class BootstrapRegression(unittest.TestCase):
+    def test_context_file_values_are_not_misclassified_as_external_environment(self):
+        for source in (False, True):
+            for overrides, expected in [({}, 'unset:unset'),
+                                        ({'JEV_HISTORY': '0', 'JEV_CONTEXT_MESSAGES': '7'}, '0:7')]:
+                with self.subTest(source=source, overrides=overrides):
+                    completed, trace, log = run_launcher('existing', source, overrides)
+                    self.assertEqual(completed.returncode, 0, completed.stderr + log)
+                    self.assertIn('context=' + expected, trace)
+                    self.assertIn('shell-key-evaluated', trace)
+                    self.assertIn('app-started', trace)
+
     def test_app_executes_successfully_downloaded_installer(self):
         completed, trace, log = run_launcher("success")
         self.assertIn("installer-ran", trace, "Downloaded installer was never executed")

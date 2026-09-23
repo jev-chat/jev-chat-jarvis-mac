@@ -5,11 +5,11 @@ export USE_TF=0
 # uv installs to ~/.local/bin; a Finder-launched .command does not inherit a login shell
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # same user-level env the .app launcher uses (API keys live outside the repo)
-[ -f "$HOME/.config/jev-jarvis/env" ] && source "$HOME/.config/jev-jarvis/env"
+source ./packaging/bootstrap_uv.sh || exit 1
+jev_load_env "$HOME/.config/jev-jarvis/env"
 
 LOG="$HOME/Library/Logs/jev-jarvis.log"
 mkdir -p "$(dirname "$LOG")" || exit 1
-source ./packaging/bootstrap_uv.sh || exit 1
 if ! jev_check_arch; then
     print -r -- "$JEV_ARCH_ERROR"
     print -r -- "详情：$LOG"

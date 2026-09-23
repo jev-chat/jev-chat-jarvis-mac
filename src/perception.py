@@ -434,7 +434,9 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
         if b.x - keep[-1].x_right > 1.5 * max(b.h, keep[-1].h):
             break
         keep.append(b)
-    return " ".join(b.text for b in keep).strip()
+    title = " ".join(b.text for b in keep).strip()
+    # WeChat appends a changing member count; it is not part of the conversation key.
+    return re.sub(r"\s*[（(]\s*\d+\s*[）)]\s*$", "", title).strip()
 
 
 def message_side(x: float, width: float) -> str:

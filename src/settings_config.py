@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 
 import userconfig
+from chat_context import message_limit
 from generate import _endpoint, base_is_verbatim_action, http_post_json, jev_request_url, Generator, ThinkingOnlyError
 
 PREFIXES = ("TYPESAFE", "OPENAI", "ANTHROPIC")
@@ -37,12 +38,16 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
         raise ValueError("配置文件已被其他程序修改，请关闭设置窗口后重新打开。")
     # JUDGE_BACKEND is the first-run dialog's choice (judge.download_block_reason);
     # the settings window's offline-model section writes it through the same guarded path.
-    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {"JUDGE_BACKEND"}
+    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {"JUDGE_BACKEND", "JEV_HISTORY", "JEV_CONTEXT_MESSAGES"}
     if not changes.keys() <= allowed:
         raise ValueError("不支持的配置项。")
     for value in changes.values():
         if any(c in value for c in "\r\n\0"):
             raise ValueError("配置值不能含换行或空字符。")
+    if "JEV_CONTEXT_MESSAGES" in changes:
+        message_limit(changes["JEV_CONTEXT_MESSAGES"])
+    if "JEV_HISTORY" in changes and changes["JEV_HISTORY"] not in ("0", "1"):
+        raise ValueError("历史记录开关必须是 0 或 1")
     remaining = dict(changes)
     lines = []
     for line in original.splitlines(keepends=True):
@@ -103,6 +108,7 @@ def list_models(prefix: str, base: str, key: str) -> list[str]:
         p = urllib.parse.urlsplit(url)
         path = p.path + ("?after_id=" + urllib.parse.quote(after, safe="") if after else "")
         cls = http.client.HTTPSConnection if p.scheme == "https" else http.client.HTTPConnection
+        assert p.hostname is not None  # validate_endpoint checked the host above.
         conn = cls(p.hostname, p.port, timeout=15)
         try:
             conn.request("GET", path, headers=headers)
