@@ -1,12 +1,16 @@
 # Pullfrog agent：手动 dispatch 直接跑；PR 的 CI 绿了之后自动跟进做 AI 评审。
 #
-# 自动路径的安全模型（不要破坏）：
-# - workflow_run 在主仓库可信上下文执行（读得到 secrets 与官方 token），因此
-#   checkout 只允许两种东西：默认分支（手动 dispatch），或 GitHub 生成的
-#   merge ref（refs/pull/<N>/merge，自动评审）。**不要 checkout fork PR 的
-#   head 代码**，也不要给 checkout 开 allow-unsafe-pr-checkout——那等于把本
-#   workflow env 里的 API key 交给外来 PR 代码（pwn request）。
-# - 自动评审只挂一把 provider key，需要换 provider 就改那一行（secret 先配好）。
+# 凭据模型（实测过，别破坏）：
+# - agent 凭据由 Pullfrog 服务端持有：job 的 id-token: write 是 pullfrog action
+#   走 OIDC 向 pullfrog.com 认证用的，**别删**。本仓库与同类仓库 secrets 全空、
+#   agent 照常评审（服务端配的 provider，如 DeepSeek Pro）。
+# - 因此**不要**往 env 里加 provider API key：那会把 key 注入到跑在 PR 代码
+#   上下文里的 agent，服务端持钥没有这个暴露面。
+# - 自动路径 checkout 用 GitHub 生成的 merge ref（refs/pull/<N>/merge），
+#   **不要改成 fork PR 的 head 代码**，也不要给 checkout 开
+#   allow-unsafe-pr-checkout——workflow_run 是可信上下文，checkout 外来 head
+#   代码就是 pwn request。PR 内容对 agent 仍是不可信输入（prompt 注入面），
+#   env 只放权限受限的 github.token。
 # - 触发器按 workflow 名字关联 ci.yml（workflows: [CI]），那边改 name 这里要同步。
 name: Pullfrog
 run-name: ${{ inputs.name || github.workflow }}
@@ -42,9 +46,9 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'pull_request')
     permissions:
-      id-token: write
+      id-token: write       # pullfrog action 服务端认证（见文件头「凭据模型」）
       contents: read
-      issues: write        # PR 评论走 issues API
+      issues: write         # 评审结论落 PR 评论（issues API 承载评论）
       pull-requests: write
     steps:
       - name: 定位 PR
@@ -63,10 +67,10 @@ jobs:
             echo "head_sha=$HEAD_SHA 未关联到 open PR，跳过"
             echo "number=" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          INFO=$(gh pr view "$PR" --json state,mergeable,author --jq '"\(.state)|\(.mergeable)|\(.author.login)"')
-          STATE="${INFO%%|*}"; REST="${INFO#*|}"; MERGEABLE="${REST%%|*}"; AUTHOR="${REST#*|}"
-          if [ "$STATE" != "OPEN" ] || [ "$MERGEABLE" != "MERGEABLE" ]; then
-            echo "PR #$PR 状态 $STATE/$MERGEABLE（需 OPEN 且可合并），跳过评审"
+          INFO=$(gh pr view "$PR" --json state,author --jq '"\(.state)|\(.author.login)"')
+          STATE="${INFO%%|*}"; AUTHOR="${INFO#*|}"
+          if [ "$STATE" != "OPEN" ]; then
+            echo "PR #$PR 状态 $STATE（需 OPEN），跳过评审"
             echo "number=" >> "$GITHUB_OUTPUT"; exit 0
           fi
           case "$AUTHOR" in
@@ -74,13 +78,29 @@ jobs:
               echo "PR #$PR 作者为 bot（$AUTHOR），跳过评审（防自评审循环）"
               echo "number=" >> "$GITHUB_OUTPUT"; exit 0;;
           esac
+          # mergeable 在 PR 刚开/重开时会短暂返回 UNKNOWN，重试而非误跳过；
+          # 只有明确 CONFLICTING（或重试后仍 UNKNOWN）才跳过
+          MERGEABLE=""
+          for i in 1 2 3 4 5 6; do
+            MERGEABLE=$(gh pr view "$PR" --json mergeable --jq .mergeable)
+            [ "$MERGEABLE" != "UNKNOWN" ] && break
+            echo "mergeable=UNKNOWN，5s 后重试（$i/6）"; sleep 5
+          done
+          if [ "$MERGEABLE" = "CONFLICTING" ] || [ "$MERGEABLE" = "UNKNOWN" ]; then
+            echo "PR #$PR mergeable=$MERGEABLE，跳过评审（冲突需先 rebase）"
+            echo "number=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           echo "评审目标：PR #$PR（作者 $AUTHOR）"
           echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      # 后续步骤统一 gate：workflow_run 的跳过场景到这里就干净结束（job 绿），
+      # 不再往下走——否则会在组 prompt 步骤以「缺 prompt」报错变红
 
       # 手动 dispatch 检出当前分支；自动路径检出 GitHub 生成的 merge ref
       # （原生 git 拉取，不经过 actions/checkout 的 workflow_run+fork 拒绝逻辑，
       # 也不需要任何 unsafe 开关）
       - name: Checkout
+        if: github.event_name == 'workflow_dispatch' || steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -93,6 +113,7 @@ jobs:
           git checkout -q FETCH_HEAD
 
       - name: 组 prompt
+        if: github.event_name == 'workflow_dispatch' || steps.pr.outputs.number != ''
         env:
           USER_PROMPT: ${{ inputs.prompt }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -117,10 +138,10 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Run agent
+        if: github.event_name == 'workflow_dispatch' || steps.pr.outputs.number != ''
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ env.PROMPT }}
         env:
           GH_TOKEN: ${{ github.token }}
-          # 自动评审只挂一把 key；要换 provider 改这一行
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # 不放 provider key：凭据由 Pullfrog 服务端持有（见文件头「凭据模型」）
