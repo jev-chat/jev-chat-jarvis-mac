@@ -90,6 +90,8 @@ BURST_TICK = 0.45        # short cadence right after a change: catch the burst's
 BURST_READS = 3          # how many reads stay on BURST_TICK before falling back to SLOW_TICK
 SLOW_TICK = 1.0          # re-check cadence while the chat pane keeps moving
 READ_FAILURE_HIDE_S = 2.0  # do not flicker on a transient capture/window miss
+EMPTY_FRAME_REUSE_S = READ_FAILURE_HIDE_S  # #58: how long an empty-OCR streak may
+                                           # reuse the last read before giving up
 SETTLE_S = 1.2           # upper bound on the settle wait (anti-flood; unchanged by design)
 EARLY_SETTLE_S = 0.70    # the gate may open this early …
 STABLE_READS = 3         # … but only after this many consecutive unchanged reads
@@ -269,7 +271,8 @@ class HudController(NSObject):
         self._foreground_epoch = 0    # catches leave+return while one capture is in flight
         self._read_fail_since = None  # debounce transient foreground capture failures
         self._read_fail_hidden = False
-        self._empty_frame_since = None  # OCR empty-frame (0 blocks) started here, for #58
+        self._empty_frame_since = None  # empty-OCR streak start (#58): reuse the last
+                                        # read, give up after EMPTY_FRAME_REUSE_S
         self._last_origin = None      # last applied panel origin
         self._pending_origin = None   # candidate origin awaiting confirmation
         self._build_panel()
@@ -1559,12 +1562,35 @@ class HudController(NSObject):
             res = self._last_full
         elif (not res["messages"] and self._last_full is not None
               and self._last_full.get("messages")):
-            # Transient empty frame (#58): reuse the last good read so the settle gate
-            # keeps its message and timer instead of resetting as a conversation switch.
-            if self._empty_frame_since is None:
-                self._empty_frame_since = time.monotonic()
-                _log("读屏瞬时为空 · 保留上一帧并继续重试")
-            res = self._last_full
+            # Transient empty frame (#58): the window is still enumerated and the capture
+            # succeeded, but OCR returned 0 blocks (WeChat 4.x redraw glitch). Reuse the
+            # last good read so the settle gate keeps its target and timer. Entering the
+            # streak retires in-flight workers once (a candidate computed for a vanished
+            # message must never surface) but keeps the reply target and re-arms both
+            # prework halves at the new epoch, so the settle path stays the fast one.
+            now_mono = time.monotonic()
+            if (self._empty_frame_since is not None
+                    and now_mono - self._empty_frame_since > EMPTY_FRAME_REUSE_S):
+                # A persistently empty read is no longer a one-frame glitch: give up on
+                # reuse and fall through as a real empty read (same grace as a capture
+                # miss); the key change below then clears the stale target.
+                _log(f"读屏为空已持续 {now_mono - self._empty_frame_since:.1f}s"
+                     f" · 放弃沿用上一帧")
+                self._empty_frame_since = None
+                self._last_full = None
+            else:
+                if self._empty_frame_since is None:
+                    self._empty_frame_since = now_mono
+                    _log("读屏为空 · 沿用上一帧继续分析")
+                    last_msgs = self._last_full.get("messages") or []
+                    last_thems = [m for m in last_msgs if m.side == "them"]
+                    if last_thems:
+                        self._reply_epoch += 1
+                        self.analyzed_text = None   # let the settle gate re-open
+                        self._enqueue_prework(last_thems[-1], last_msgs,
+                                              last_thems[-2].text
+                                              if len(last_thems) > 1 else "")
+                res = self._last_full
         else:
             self._empty_frame_since = None
             self._last_full = res
@@ -1634,17 +1660,7 @@ class HudController(NSObject):
                  f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
             # latest-wins: overwrite the slot, retire the old verdict — only the newest
             # text's judgment can ever be consumed, and only by the settle gate below
-            self._prejudge_req = (newest.text, self._context_text(msgs, newest, JUDGE_TURNS),
-                                  newest.sender, prev_text, self._reply_epoch)
-            self._prejudge_result = None
-            self._prejudge_event.set()
-            # same discipline for the generation half: fire now, supersede on the next
-            # arrival, spend at settle. Tones are captured here — a dropdown click during
-            # the window invalidates the result at consumption time (checked in _take_pregen)
-            self._pregen_req = (newest.text, self._context_text(msgs, newest),
-                                tuple(self.slot_tones), self._reply_epoch)
-            self._pregen_result = None
-            self._pregen_event.set()
+            self._enqueue_prework(newest, msgs, prev_text)
             # keep the previous verdict readable; just badge that something new landed
             self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
 
@@ -1695,6 +1711,25 @@ class HudController(NSObject):
                 _log(f"暂不分析（{why}）")
         else:
             self._last_skip_reason = None
+
+    @objc.python_method
+    def _enqueue_prework(self, newest, msgs, prev_text):
+        """Queue the prejudge + pregen halves at the current reply epoch (latest-wins).
+
+        Fired on arrival and re-fired when an empty-OCR frame retires the in-flight
+        workers (#58): overwriting the slot means only the newest text's judgment can
+        ever be consumed, and only by the settle gate. Tones are captured here — a
+        dropdown click during the window invalidates the result at consumption time
+        (checked in _take_pregen).
+        """
+        self._prejudge_req = (newest.text, self._context_text(msgs, newest, JUDGE_TURNS),
+                              newest.sender, prev_text, self._reply_epoch)
+        self._prejudge_result = None
+        self._prejudge_event.set()
+        self._pregen_req = (newest.text, self._context_text(msgs, newest),
+                            tuple(self.slot_tones), self._reply_epoch)
+        self._pregen_result = None
+        self._pregen_event.set()
 
     @objc.python_method
     def _run_analysis(self, newest, msgs, prev_text: str):

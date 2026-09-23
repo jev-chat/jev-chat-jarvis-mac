@@ -39,7 +39,7 @@ class HudReplyTests(unittest.TestCase):
             _prejudging=False, _paused=False, _analyzing=False,
             _stable_n=0, last_change_ts=0, last_analyze_ts=0,
             _wechat_frontmost=None, _foreground_epoch=0,
-            _read_fail_since=None, _read_fail_hidden=False,
+            _read_fail_since=None, _read_fail_hidden=False, _empty_frame_since=None,
             _prejudge_event=threading.Event(), _pregen_event=threading.Event(),
             slot_tones=['normal'], _stream_rows={}, _last_context=None,
         ).items():
@@ -155,10 +155,45 @@ class HudReplyTests(unittest.TestCase):
         self.assertIsNone(self.h._pregen_req)
 
     def test_empty_ocr_also_invalidates_target(self):
+        # #58: an empty frame no longer clears the reply target (that reset is what kept
+        # the settle analysis from ever finishing), but it must still retire every
+        # in-flight worker and re-arm both prework halves at the new epoch — a candidate
+        # computed for a message that might have vanished must never surface.
+        self.incoming()
+        epoch = self.h._reply_epoch
+        self.read([])
+        self.assertGreater(self.h._reply_epoch, epoch)
+        self.assertEqual(self.h._prejudge_req[4], self.h._reply_epoch)
+        self.assertEqual(self.h._pregen_req[3], self.h._reply_epoch)
+        self.assertIsNone(self.h.analyzed_text)
+        self.assertEqual(self.h._reply_key, ('chat', '下午开会'))
+        self.assertEqual(self.h.last_seen, '下午开会')
+
+    def test_empty_frame_streak_reuses_without_resetting_settle(self):
+        # #58: reads during the empty streak keep the last good frame; the recovery read
+        # with the same message is not a new arrival — the epoch stays where the streak
+        # put it and the settle timer keeps running.
+        self.incoming()
+        epoch = self.h._reply_epoch
+        change_ts = self.h.last_change_ts
+        self.read([])
+        self.read([block('下午开会', .40, .70, .15)])
+        self.assertEqual(self.h._reply_epoch, epoch + 1)
+        self.assertEqual(self.h.last_change_ts, change_ts)
+        self.assertEqual(self.h._prejudge_req[4], epoch + 1)
+
+    def test_persistent_empty_frame_gives_up_reuse(self):
+        # after the reuse grace the streak falls back to a real empty read: the stale
+        # target clears exactly the way the pre-#58 behavior cleared it
         self.incoming()
         self.read([])
+        self.h._empty_frame_since = time.monotonic() - 60.0
+        self.read([])
         self.assertIsNone(self.h._reply_key)
+        self.assertIsNone(self.h.last_seen)
+        self.assertIsNone(self.h._prejudge_req)
         self.assertIsNone(self.h._pregen_req)
+        self.assertIsNone(self.h._last_full)
 
     def test_old_worker_completion_and_same_text_reappearance(self):
         self.incoming()
