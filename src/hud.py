@@ -269,6 +269,7 @@ class HudController(NSObject):
         self._foreground_epoch = 0    # catches leave+return while one capture is in flight
         self._read_fail_since = None  # debounce transient foreground capture failures
         self._read_fail_hidden = False
+        self._empty_frame_since = None  # OCR empty-frame (0 blocks) started here, for #58
         self._last_origin = None      # last applied panel origin
         self._pending_origin = None   # candidate origin awaiting confirmation
         self._build_panel()
@@ -1416,6 +1417,7 @@ class HudController(NSObject):
         self._last_skip_reason = None
         self._read_fail_since = None
         self._read_fail_hidden = False
+        self._empty_frame_since = None
 
         if frontmost:
             self._next_read_ts = 0
@@ -1555,7 +1557,16 @@ class HudController(NSObject):
             # the settle/analyze gate below still runs every read; an unchanged frame
             # just skips re-deriving the messages it would act on
             res = self._last_full
+        elif (not res["messages"] and self._last_full is not None
+              and self._last_full.get("messages")):
+            # Transient empty frame (#58): reuse the last good read so the settle gate
+            # keeps its message and timer instead of resetting as a conversation switch.
+            if self._empty_frame_since is None:
+                self._empty_frame_since = time.monotonic()
+                _log("读屏瞬时为空 · 保留上一帧并继续重试")
+            res = self._last_full
         else:
+            self._empty_frame_since = None
             self._last_full = res
             self._push("applyChat:", res.get("chat_title") or "")
 
