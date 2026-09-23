@@ -71,7 +71,9 @@ try:
         h.conversations.save_background('另外的聊天', '原有背景')
         h.judge = SimpleNamespace()
         fixture.incoming()
-        c = SettingsController.alloc().init().build(h)
+        applied = []
+        c = SettingsController.alloc().init().build(h, applied.append)
+        assert c.window.level() == A.NSNormalWindowLevel, 'settings window must not stay on top'
         c.show()
         jev = c.fields['TYPESAFE']
         jev['API_KEY'].setStringValue_('test-jev-key')
@@ -86,6 +88,14 @@ try:
         fields['API_KEY'].setStringValue_('test-only-key')
         fields['BASE_URL'].setStringValue_(SettingsNetwork.base + '/v1')
         fields['MODEL'].setStringValue_('typed-model')
+        c.context_fields['JUDGE_CONTEXT_TURNS'].setStringValue_('3')
+        c.context_fields['GENERATION_CONTEXT_TURNS'].setStringValue_('6')
+        c.tone_fields[0].selectItemWithTitle_('自然沟通')
+        c.candidate_count_field.selectItemWithTitle_('3')
+        c.auto_hide_check.setState_(A.NSControlStateValueOff)
+        c.auto_dock_check.setState_(A.NSControlStateValueOff)
+        c.background_capture_check.setState_(A.NSControlStateValueOn)
+        c.always_on_top_check.setState_(A.NSControlStateValueOff)
         Server.response = {'data': [{'id': 'served-model'}]}
         Server.code = 200
         request_button(c, 'OPENAI', '获取模型列表').performClick_(None)
@@ -105,11 +115,22 @@ try:
         c.save_button.performClick_(None)
         assert '已保存' in c.status.stringValue(), c.status.stringValue()
         assert userconfig.parse_env_file(path)['OPENAI_MODEL'] == 'typed-model'
+        assert userconfig.parse_env_file(path)['JUDGE_CONTEXT_TURNS'] == '3'
+        assert userconfig.parse_env_file(path)['GENERATION_CONTEXT_TURNS'] == '6'
+        assert userconfig.parse_env_file(path)['JEV_DEFAULT_TONE_1'] == '自然沟通'
+        assert userconfig.parse_env_file(path)['JEV_CANDIDATES_PER_TONE'] == '3'
+        assert userconfig.parse_env_file(path)['JEV_AUTO_HIDE'] == '0'
+        assert userconfig.parse_env_file(path)['JEV_AUTO_DOCK'] == '0'
+        assert userconfig.parse_env_file(path)['JEV_BACKGROUND_CAPTURE'] == '1'
+        assert userconfig.parse_env_file(path)['JEV_PANEL_ALWAYS_ON_TOP'] == '0'
+        assert applied and applied[-1]['JEV_CANDIDATES_PER_TONE'] == '3'
+        assert applied[-1]['JEV_BACKGROUND_CAPTURE'] == '1'
+        assert applied[-1]['JEV_PANEL_ALWAYS_ON_TOP'] == '0'
         assert '# keep\nJEV_TONES="名字=说明"\n' in path.read_text()
         assert path.stat().st_mode & 0o777 == 0o600
-        assert not userconfig.get('OPENAI_API_KEY'), 'must not hot reload'
+        assert userconfig.get('OPENAI_API_KEY') == 'test-only-key', 'save must hot reload'
         assert not c.changed()
-        for index, name in enumerate(('jev', 'openai', 'anthropic')):
+        for index, name in enumerate(('general', 'jev', 'openai', 'anthropic')):
             c.tabs.selectTabViewItemAtIndex_(index)
             A.NSRunLoop.currentRunLoop().runUntilDate_(
                 NSDate.dateWithTimeIntervalSinceNow_(0.1))
@@ -251,6 +272,8 @@ try:
             restart_context.window.close()
         reopened = SettingsController.alloc().init().build()
         assert reopened.fields['OPENAI']['MODEL'].stringValue() == 'typed-model'
+        assert reopened.context_fields['JUDGE_CONTEXT_TURNS'].stringValue() == '3'
+        assert reopened.context_fields['GENERATION_CONTEXT_TURNS'].stringValue() == '6'
         # Existing keychain expression remains byte-for-byte when editing only the model.
         path.write_text('export OPENAI_API_KEY="$(security find-generic-password -w)" # keep expression\nOPENAI_MODEL=old\n')
         shell = SettingsController.alloc().init().build()
@@ -258,6 +281,6 @@ try:
         shell.save_button.performClick_(None)
         assert 'export OPENAI_API_KEY="$(security find-generic-password -w)" # keep expression\n' in path.read_text()
         assert shell.fields['OPENAI']['API_KEY'].stringValue() == ''
-        print('PASS: native controls, model requests, unified save, chat drafts, validation, partial-save retry, clear history, external file refresh, draft preservation, corrupt-file recovery, environment priority, restart isolation, shell-expression preservation')
+        print('PASS: native general/model/context tabs, live apply, model requests, chat drafts, validation, partial-save retry, clear history, external refresh, secure save, environment priority, restart isolation, shell-expression preservation')
 finally:
     SettingsNetwork.tearDownClass()

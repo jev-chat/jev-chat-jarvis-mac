@@ -74,6 +74,78 @@ class SettingsFiles(unittest.TestCase):
                 with patch.object(userconfig, '_startup_sources', None), patch.dict(os.environ, {}, clear=True):
                     self.assertEqual(userconfig.provider('OPENAI')['model'], 'after')
 
+    def test_context_turns_validation_defaults_and_persistence(self):
+        self.assertEqual(config.validate_context_turns('0', 'JUDGE_CONTEXT_TURNS'), 0)
+        self.assertEqual(config.validate_context_turns('11', 'GENERATION_CONTEXT_TURNS'), 11)
+        for value in ('', '1.5', '-1', '12', 'many'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                config.validate_context_turns(value, 'JUDGE_CONTEXT_TURNS')
+
+        with patch.object(userconfig, 'get', return_value=''):
+            self.assertEqual(config.context_turns('JUDGE_CONTEXT_TURNS'), 2)
+            self.assertEqual(config.context_turns('GENERATION_CONTEXT_TURNS'), 4)
+        with patch.object(userconfig, 'get', return_value='99'):
+            self.assertEqual(config.context_turns('JUDGE_CONTEXT_TURNS'), 11)
+        with patch.object(userconfig, 'get', return_value='invalid'):
+            self.assertEqual(config.context_turns('GENERATION_CONTEXT_TURNS'), 4)
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'env'
+            original = '# context\nJUDGE_CONTEXT_TURNS=2 # keep\n'
+            path.write_text(original)
+            text = config.write_settings(path, original, {
+                'JUDGE_CONTEXT_TURNS': '5',
+                'GENERATION_CONTEXT_TURNS': '7',
+            })
+            self.assertIn('JUDGE_CONTEXT_TURNS=5 # keep\n', text)
+            self.assertEqual(userconfig.parse_env_file(path)['GENERATION_CONTEXT_TURNS'], '7')
+
+    def test_app_behavior_validation_defaults_and_persistence(self):
+        self.assertEqual(config.validate_candidate_count('1'), 1)
+        self.assertEqual(config.validate_candidate_count('4'), 4)
+        for value in ('', '0', '6', '1.5', 'many'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                config.validate_candidate_count(value)
+        with patch.object(userconfig, 'get', return_value=''):
+            self.assertEqual(config.candidate_count(), 2)
+            self.assertTrue(config.bool_setting('JEV_AUTO_HIDE'))
+            self.assertTrue(config.bool_setting('JEV_AUTO_DOCK'))
+            self.assertFalse(config.bool_setting('JEV_BACKGROUND_CAPTURE'))
+            self.assertTrue(config.bool_setting('JEV_PANEL_ALWAYS_ON_TOP'))
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'env'
+            original = '# behavior\n'
+            path.write_text(original)
+            config.write_settings(path, original, {
+                'JEV_DEFAULT_TONE_1': '自然沟通',
+                'JEV_CANDIDATES_PER_TONE': '4',
+                'JEV_AUTO_HIDE': '0',
+                'JEV_AUTO_DOCK': '0',
+                'JEV_BACKGROUND_CAPTURE': '1',
+                'JEV_PANEL_ALWAYS_ON_TOP': '0',
+            })
+            saved = userconfig.parse_env_file(path)
+            self.assertEqual(saved['JEV_DEFAULT_TONE_1'], '自然沟通')
+            self.assertEqual(saved['JEV_CANDIDATES_PER_TONE'], '4')
+            self.assertEqual(saved['JEV_AUTO_HIDE'], '0')
+            self.assertEqual(saved['JEV_AUTO_DOCK'], '0')
+            self.assertEqual(saved['JEV_BACKGROUND_CAPTURE'], '1')
+            self.assertEqual(saved['JEV_PANEL_ALWAYS_ON_TOP'], '0')
+
+    def test_session_override_masks_frozen_provider_without_restart(self):
+        frozen = [('user env', {
+            'OPENAI_API_KEY': 'old-key',
+            'OPENAI_BASE_URL': 'https://old.invalid/v1',
+            'OPENAI_MODEL': 'old-model',
+        })]
+        with patch.object(userconfig, '_startup_sources', frozen), \
+                patch.object(userconfig, '_session_overrides', {}):
+            userconfig.session_override('OPENAI_MODEL', 'new-model')
+            self.assertEqual(userconfig.provider('OPENAI')['model'], 'new-model')
+            userconfig.session_override('OPENAI_API_KEY', '')
+            self.assertEqual(userconfig.provider('OPENAI')['key'], '')
+
 
 class Server(BaseHTTPRequestHandler):
     requests = []

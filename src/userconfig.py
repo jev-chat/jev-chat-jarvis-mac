@@ -32,6 +32,16 @@ The names are the conventional ones you likely already export for other tools:
     ANTHROPIC_MODEL
 
     LLM_MODEL            shared model name, used when the per-provider one is absent
+
+    JUDGE_CONTEXT_TURNS       prior bubbles sent to intent/risk judgment (default 2)
+    GENERATION_CONTEXT_TURNS  prior bubbles sent to reply generation (default 4)
+
+    JEV_DEFAULT_TONE_1..3    default candidate communication types
+    JEV_CANDIDATES_PER_TONE  candidates per selected type (1..4, default 2)
+    JEV_AUTO_HIDE             hide the HUD when WeChat is unavailable (default 1)
+    JEV_AUTO_DOCK             keep the HUD docked beside WeChat (default 1)
+    JEV_BACKGROUND_CAPTURE    keep reading while WeChat is not frontmost (default 0)
+    JEV_PANEL_ALWAYS_ON_TOP   keep the HUD above ordinary windows (default 1)
 """
 
 from __future__ import annotations
@@ -144,10 +154,10 @@ def _label() -> str:
 
 _startup_sources: list[tuple[str, dict[str, str]]] | None = None
 
-# Session-scoped overrides: read first by get(), never persisted. Exists because the
-# startup snapshot freezes os.environ at import time, so a plain os.environ write later
-# is invisible to get() — the #38 first-run dialog needs its choice honoured immediately,
-# not after a restart.
+# Session-scoped overrides: a settings save is persisted and also placed here so every
+# subsequent read in this process sees it immediately. Keys present here mask the frozen
+# startup sources even when their value is empty; that is how clearing a saved key can
+# actually switch providers without restarting.
 _session_overrides: dict[str, str] = {}
 
 
@@ -156,7 +166,7 @@ def session_override(key: str, value: str) -> None:
     _session_overrides[key] = value
 
 
-def _sources() -> list[tuple[str, dict[str, str]]]:
+def _base_sources() -> list[tuple[str, dict[str, str]]]:
     if _startup_sources is not None:
         return _startup_sources
     return [
@@ -166,11 +176,19 @@ def _sources() -> list[tuple[str, dict[str, str]]]:
     ]
 
 
+def _sources() -> list[tuple[str, dict[str, str]]]:
+    base = _base_sources()
+    if not _session_overrides:
+        return base
+    masked = set(_session_overrides)
+    return [("当前会话", dict(_session_overrides))] + [
+        (source, {key: value for key, value in values.items() if key not in masked})
+        for source, values in base
+    ]
+
+
 def get(*names: str) -> str:
     """First non-empty value among `names`, searching sources in priority order."""
-    for name in names:
-        if _session_overrides.get(name):
-            return _session_overrides[name]
     for _src, vals in _sources():
         for name in names:
             if vals.get(name):
@@ -210,9 +228,10 @@ def provider(prefix: str) -> dict[str, str]:
 def load() -> dict[str, str]:
     """Copy the user env files into os.environ (variables already set win)."""
     global _startup_sources
-    # Keep this process on its startup configuration: settings saves require restart.
+    # Freeze external sources for consistency; settings saves layer explicit live
+    # overrides on top rather than mutating this snapshot in place.
     if _startup_sources is None:
-        _startup_sources = _sources()
+        _startup_sources = _base_sources()
     loaded = _merged_env_file()
     for key, val in loaded.items():
         if val and not os.environ.get(key):

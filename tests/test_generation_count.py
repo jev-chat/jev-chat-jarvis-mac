@@ -40,7 +40,7 @@ class CandidateCountGenerationTests(unittest.TestCase):
         self.assertEqual((texts, error), (["只给一条回复"], ""))
         prompt = call.call_args.args[0]
         self.assertIn("请写 1 条回复候选", prompt)
-        self.assertIn("只写一条稳妥", prompt)
+        self.assertIn("这一条要稳妥", prompt)
         self.assertNotIn("前一条稳妥", prompt)
 
     def test_multiple_candidates_are_limited_to_configured_count(self):

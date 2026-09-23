@@ -20,8 +20,8 @@ import userconfig
 MAX_SLOTS = 3
 
 # Candidates per tone. Each tone gets its own request (they run concurrently), and the
-# replies in one response are the same voice at different levels of nerve. The setting is
-# read once at startup so the HUD, prompt and parser all use the same row count.
+# replies in one response are the same voice at different levels of nerve. The HUD builds
+# the maximum number of rows once, then exposes only the live configured count.
 DEFAULT_PER_TONE = 2
 MIN_PER_TONE = 1
 MAX_PER_TONE = 5
@@ -47,7 +47,7 @@ def validate_candidate_count(raw: str) -> int:
     return value
 
 
-PER_TONE = candidate_count(userconfig.get("JEV_CANDIDATES_PER_TONE"))
+PER_TONE = MAX_PER_TONE
 
 # label -> instruction. Order here is the order shown in the dropdowns.
 #
@@ -60,6 +60,13 @@ BUILTIN: dict[str, str] = {
     "高情商话术": (
         "像公司里那个谁都说好的老同事：先接住对方情绪（「我理解」「确实」），再说事实和下一步，"
         "拒绝也带替代方案加一个具体时间点。不说教、不绕圈子、句尾不堆「呢/哦/啦」。"
+    ),
+    "自然沟通": (
+        "像本人在认真回微信：先回应对方说的具体情况，需要时自然带出自己的感受或需要，"
+        "再给清楚、可执行的回应或请求。参考非暴力沟通，但不机械套「观察、感受、需要、请求」四步。"
+        "保留口语、个人习惯和真实的不确定，不编造事实，不说教，不端着。"
+        "去掉 AI 腔：不用「不是…而是…」、「一句话讲清楚」、自问自答、强行排比、空洞总结、夸张比喻、"
+        "书面套话、装饰性引号或破折号。句子长短自然，每句都要有新信息。"
     ),
     "贴吧老哥 v1.0": (
         "贴吧老哥：一口网感口语，「有一说一」「绷不住了」「搁这」「这就去整」随手就来，"

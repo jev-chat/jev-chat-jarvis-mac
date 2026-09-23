@@ -349,6 +349,8 @@ def _download_progress(report, min_interval=0.5):
 class Judge:
     """Wraps a decoder-only decision model; lazy-loads on first use."""
 
+    enabled = True
+
     def __init__(self, repo: str = "Mapika/decider-2b", device: str | None = None):
         import torch
 
@@ -538,6 +540,8 @@ class FallbackJudge:
     verdict carries which backend produced it.
     """
 
+    enabled = True
+
     def __init__(self):
         import judge_jev
         self.primary = judge_jev.JevJudge()
@@ -591,12 +595,52 @@ class FallbackJudge:
         return None
 
 
+class DisabledJudge:
+    """Marker backend used when the user has deliberately left judgment disabled.
+
+    The HUD checks ``enabled`` before scheduling work, so these methods are defensive:
+    accidentally calling one is a programming error, not a reason to silently load the
+    7 GB local model.
+    """
+
+    enabled = False
+    load_status = None
+
+    def warm(self) -> None:
+        return None
+
+    def judge(self, message: str, context: str | None = None) -> dict:
+        raise RuntimeError("判断功能未启用")
+
+    def rank_candidates(self, message: str, intent: str,
+                        candidates: list[str]) -> list[dict]:
+        return [{"text": text, "prob": None} for text in candidates]
+
+
+def judgment_enabled() -> bool:
+    """Whether this launch should run intent/risk judgment.
+
+    A configured Jev key always enables it. ``local`` and the historical unset state
+    keep local judgment available; ``cloud`` without a key and ``skip`` are genuine
+    off states, rather than implicit requests to fall back to the local model.
+    """
+    try:
+        import judge_jev
+        if judge_jev.jev_configured():
+            return True
+    except Exception:
+        pass
+    return userconfig.get("JUDGE_BACKEND").strip().lower() not in ("cloud", "skip")
+
+
 def make_judge():
-    """Jev when a key is configured, otherwise the local decider-2b."""
+    """Jev with a key, disabled for cloud/skip without one, otherwise local."""
     try:
         import judge_jev
         if judge_jev.jev_configured():
             return FallbackJudge()
     except Exception:
         pass
+    if not judgment_enabled():
+        return DisabledJudge()
     return Judge()
