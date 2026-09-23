@@ -73,6 +73,7 @@ from perception import (  # noqa: E402
 import judge  # noqa: E402  (model_cached / model_disk_usage: the #38 onboarding + settings)
 from judge import LowMemoryError, ModelNotDownloadedError, make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
+import orcarouter  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
 import ui_style  # noqa: E402
@@ -2285,11 +2286,11 @@ def warn_if_no_generation_key() -> None:
     launch is the cheapest way to tell the two apart — it cannot be missed the way a line
     of grey text in a floating panel can.
 
-    OPENAI_* and ANTHROPIC_* are two ways to configure the same generation layer, so this
-    fires only when NEITHER is set: either one on its own is a complete configuration.
-    A packaged build also carries a shared default (src/builtin.py), so this dialog only
-    appears when that default was deliberately emptied out. TypeSafe is not checked — it
-    has a local fallback, so it is never missing, only different.
+    OPENAI_*, ANTHROPIC_* and ORCAROUTER_* are three ways to configure the same generation
+    layer, so this fires only when NONE is set: any one of them on its own is a complete
+    configuration. A packaged build also carries a shared default (src/builtin.py), so this
+    dialog only appears when that default was deliberately emptied out. TypeSafe is not
+    checked — it has a local fallback, so it is never missing, only different.
 
     Drawn with osascript rather than NSAlert, which was measured to not work here: an
     accessory app cannot activate itself (NSApp.isActive stays False after
@@ -2305,9 +2306,10 @@ def warn_if_no_generation_key() -> None:
     script = (
         'display alert "生成层还没配 Key，候选回复会是空的" message "'
         "意图和风险判断不受影响 —— 那部分跑在本地模型上，不需要 Key。\\n\\n"
-        f"在下面的文件里填这两组中的任意一组（二选一即可），然后重启本应用：\\n{path}\\n\\n"
+        f"在下面的文件里填这三组中的任意一组（三选一即可），然后重启本应用：\\n{path}\\n\\n"
         "    OPENAI_API_KEY      （任意 OpenAI 兼容端点，如 DeepSeek）\\n"
-        '    ANTHROPIC_API_KEY   （任意 Anthropic 兼容端点，如智谱）" as informational'
+        "    ANTHROPIC_API_KEY   （任意 Anthropic 兼容端点，如智谱）\\n"
+        '    ORCAROUTER_API_KEY  （OrcaRouter 网关，也可在设置窗口用账号登录）" as informational'
     )
     try:
         subprocess.Popen(["osascript", "-e", script],
@@ -2328,6 +2330,7 @@ def main() -> None:
          f"{'TypeSafe Jev' if userconfig.get('TYPESAFE_API_KEY') else '本地 decider-2b'}"
          f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}"
          + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
+         + ("（OrcaRouter）" if _key and orcarouter.stored_credential().key == _key else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))
     controller._show()
     # #38: ask a brand-new user how to judge BEFORE warming — the choice lands in

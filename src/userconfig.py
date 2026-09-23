@@ -31,6 +31,11 @@ The names are the conventional ones you likely already export for other tools:
     ANTHROPIC_BASE_URL
     ANTHROPIC_MODEL
 
+    ORCAROUTER_API_KEY   same job, through the OrcaRouter gateway (sk-orca-…)
+    ORCAROUTER_BASE_URL  default https://api.orcarouter.ai/v1
+    ORCAROUTER_MODEL     pick from the live catalog in 模型设置; headless default
+                         is orcarouter/auto
+
     LLM_MODEL            shared model name, used when the per-provider one is absent
 """
 

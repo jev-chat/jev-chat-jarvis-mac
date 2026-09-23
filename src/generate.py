@@ -35,10 +35,15 @@ import urllib.request
 from pathlib import Path
 
 import builtin
+import orcarouter
 import userconfig
 import styles
 
 DEFAULT_MODEL = "glm-4-flash"
+# OrcaRouter's neutral default: it routes to whatever channel the workspace can reach, so
+# a headless install works without naming a vendor model. The settings window never needs
+# it — there the model comes from the live catalog (src/orcarouter.py ModelCatalog).
+ORCAROUTER_DEFAULT_MODEL = "orcarouter/auto"
 # any Anthropic-compatible /v1/messages endpoint works; this one is a cheap, fast
 # Chinese-native option and is what the project was tested against
 DEFAULT_BASE = "https://open.bigmodel.cn/api/anthropic"
@@ -314,11 +319,19 @@ def load_credentials() -> tuple[str, str, str, str, str]:
     for other tools works here:
         OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL         the common case
         ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
+        ORCAROUTER_API_KEY / ORCAROUTER_BASE_URL / ORCAROUTER_MODEL
     User credentials select the API shape by their prefix, including custom endpoints
     whose URL contains no provider name. Built-in credentials still infer from the URL.
+
+    OrcaRouter is checked after the two generic groups so an existing OpenAI/Anthropic
+    configuration keeps behaving exactly as before; it is a named provider, not a
+    replacement for them. It is always the OpenAI wire shape — the relay is
+    OpenAI-compatible, and `pick_api_format` would otherwise infer "anthropic" from a
+    self-hosted origin that happens to contain the word.
     """
     oai = userconfig.provider("OPENAI")
     anth = userconfig.provider("ANTHROPIC")
+    orca = orcarouter.resolve_credential()
 
     if oai["key"]:
         base = oai["base"] or DEFAULT_OPENAI_BASE
@@ -326,8 +339,13 @@ def load_credentials() -> tuple[str, str, str, str, str]:
     if anth["key"]:
         base = anth["base"] or DEFAULT_ANTHROPIC_BASE
         return base, anth["key"], anth["model"] or DEFAULT_MODEL, anth["source"], "anthropic"
+    if orca.present:
+        base = orcarouter.api_base()
+        model = (userconfig.get(*orcarouter.MODEL_NAMES)
+                 or ORCAROUTER_DEFAULT_MODEL)
+        return base, orca.key, model, orcarouter.source_label(orca), "openai"
 
-    # 两个都没配：回退到随包分发的内置凭据，让应用开箱就能出候选。位置在最后，
+    # 三组都没配：回退到随包分发的内置凭据，让应用开箱就能出候选。位置在最后，
     # 所以内置永远不会盖掉用户显式配的那一组。
     if builtin.API_KEY:
         return (builtin.BASE_URL, builtin.API_KEY, _resolve_builtin_model(builtin.BASE_URL),
@@ -368,11 +386,20 @@ def credential_status() -> str:
                 f"   端点: {base}  ({shape})\n"
                 f"   模型: {model}\n"
                 f"   {MISSING_HINT}")
-    return (f"✅ 凭据来源: {source.replace(home, '~')}\n"
-            f"   端点: {base}\n"
-            f"   接口: {shape}\n"
-            f"   模型: {model}\n"
-            f"   Key : {key[:6]}…{key[-4:]}  ({len(key)} chars)")
+    lines = [f"✅ 凭据来源: {source.replace(home, '~')}",
+             f"   端点: {base}",
+             f"   接口: {shape}",
+             f"   模型: {model}",
+             f"   Key : {key[:6]}…{key[-4:]}  ({len(key)} chars)"]
+    cred = orcarouter.resolve_credential()
+    if cred.present and key == cred.key:
+        # Say which entrance produced the key, and whether it is still usable. A revoked
+        # durable key needs a new sign-in — there is no refresh grant to call.
+        entrance = ("账号登录（OAuth 2.0 + PKCE）" if cred.source == "pkce" else "手填密钥")
+        lines.append(f"   入口: {entrance}")
+        if orcarouter.needs_reauth(cred):
+            lines.append("   ⚠️ 该密钥已被服务端拒绝，请在设置窗口重新登录或填写新密钥。")
+    return "\n".join(lines)
 
 
 class Generator:
@@ -383,6 +410,10 @@ class Generator:
         self.timeout = timeout
         self._creds: tuple[str, str, str] | None = None
         self._last_url = ""
+        # The credential the most recent request actually carried. A 401 has to be
+        # attributed to the exact generation that sent it, not to whatever is stored by
+        # the time the response arrives (see orcarouter.mark_needs_reauth).
+        self._last_key = ""
 
     def _creds_or_load(self):
         if self._creds is None:
@@ -402,6 +433,7 @@ class Generator:
         the old way — streaming degrades, it does not fail.
         """
         base, key, model, _src, api = load_credentials()
+        self._last_key = key
         # the constructor's overrides win — without this the `model` argument was accepted
         # and silently ignored, so the request went out with whatever the config named
         if self.model_override:
@@ -508,6 +540,22 @@ class Generator:
         self._last_url = url
         return http_post_json(url, headers, body, self.timeout)
 
+    def note_http_error(self, error: urllib.error.HTTPError) -> None:
+        """Attribute a rejected request to the exact OrcaRouter credential that sent it.
+
+        A `401` from the relay means the durable key was revoked (OrcaRouter issues no
+        refresh token, so there is nothing to refresh): mark that account + generation as
+        needing a new sign-in and let the caller report it. An old request failing after a
+        fresh login must not touch the new credential — `mark_needs_reauth` drops stale
+        generations for exactly that reason.
+        """
+        if getattr(error, "code", None) != 401 or not self._last_key:
+            return
+        cred = orcarouter.resolve_credential()
+        if not cred.present or cred.key != self._last_key:
+            return
+        orcarouter.mark_needs_reauth(cred, "HTTP 401：密钥已被撤销或失效。")
+
     @staticmethod
     def _parse(raw: str) -> list[str]:
         out = []
@@ -558,6 +606,7 @@ class Generator:
         except ThinkingOnlyError as e:
             return [], str(e)            # already panel-ready: model named, fix suggested
         except urllib.error.HTTPError as e:
+            self.note_http_error(e)
             detail = e.read()[:160].decode(errors="replace")
             return [], f"HTTP {e.code} @ {self._last_url} — {detail}"
         except Exception as e:

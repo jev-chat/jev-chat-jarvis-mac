@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import webbrowser
 from pathlib import Path
 
 import AppKit as A
@@ -11,12 +12,73 @@ from Foundation import NSObject, NSMakeRect
 
 import builtin
 import judge
+import orcarouter
 import userconfig
 import settings_config as config
 import ui_style
 
 
 PALETTE = ui_style.PALETTE
+
+
+class OrcaLoginSession:
+    """Owns one PKCE attempt: its generation, its listener, and every way it can end.
+
+    A login that is left running keeps a loopback socket open and leaves the panel busy
+    forever, so every terminal path has to release it: success, denial, exchange error,
+    timeout, an explicit Cancel, switching to another provider tab, closing the window, and
+    app termination.
+
+    A monotonically increasing generation guards every async landing. A late success or a
+    late URL from an attempt the user already abandoned must not overwrite the state of the
+    attempt that replaced it.
+
+    An AppKit window has no back-forward cache, so there is no `pagehide` event here — but
+    the failure mode the spec warns about is real and is handled the same way: `release()`
+    clears busy/hint **synchronously in the caller**, and then cancels the server-side work.
+    It does not rely on the worker's guarded `finally`, which by design refuses to touch
+    state that no longer belongs to it.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.generation = 0
+        self.busy = False
+        self.hint = ""
+        self.source: orcarouter.PkceSource | None = None
+
+    def begin(self) -> int:
+        with self._lock:
+            self.generation += 1
+            self.busy = True
+            self.hint = "正在准备浏览器授权…"
+            return self.generation
+
+    def current(self, generation: int) -> bool:
+        with self._lock:
+            return self.busy and generation == self.generation
+
+    def set_hint(self, generation: int, text: str) -> None:
+        with self._lock:
+            if generation == self.generation:
+                self.hint = text
+
+    def settle(self, generation: int) -> None:
+        with self._lock:
+            if generation == self.generation:
+                self.busy = False
+                self.source = None
+
+    def release(self) -> None:
+        """Invalidate the attempt and clear UI state now, then stop the server work."""
+        with self._lock:
+            self.generation += 1
+            self.busy = False
+            self.hint = ""
+            source = self.source
+            self.source = None
+        if source is not None:
+            source.cancel()
 
 
 class SettingsController(NSObject):
@@ -30,6 +92,9 @@ class SettingsController(NSObject):
         self.fields = {}
         self.controls = []
         self.busy = False
+        self.orca_login = OrcaLoginSession()
+        self.orca_models: dict[str, list[str]] = {"chat": [], "chat+image": []}
+        self.orca_catalog_state = {"source": "", "degraded": False, "error": ""}
         self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 760, 648),
             A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable,
@@ -74,20 +139,33 @@ class SettingsController(NSObject):
         self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(24, 184, 712, 326))
         if hasattr(self.tabs, "setDrawsBackground_"):
             self.tabs.setDrawsBackground_(False)
-        titles = ("判断 · Jev", "生成 · OpenAI 兼容", "生成 · Anthropic 兼容")
+        self.tabs.setDelegate_(self)
+        titles = ("判断 · Jev", "生成 · OpenAI 兼容", "生成 · Anthropic 兼容",
+                  "生成 · OrcaRouter")
         for index, (prefix, title) in enumerate(zip(config.PREFIXES, titles)):
             item = A.NSTabViewItem.alloc().initWithIdentifier_(prefix)
             item.setLabel_(title)
             panel = A.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 690, 300))
+            # OrcaRouter's page carries two authentication entrances as well as the three
+            # fields, so it uses a compact status strip and its own row geometry.
+            orca = prefix == "ORCAROUTER"
+            strip_y = 230 if orca else 212
+            strip_h = 58 if orca else 76
+            badge_y = 268 if orca else 254
+            source_y = 232 if orca else 220
+            field_ys = {"API_KEY": 192, "BASE_URL": 154, "MODEL": 116} if orca else \
+                {"API_KEY": 166, "BASE_URL": 120, "MODEL": 74}
             summary, source = self.current_source(prefix)
             source_surface = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
-            source_surface.setFrame_(NSMakeRect(12, 212, 666, 76))
+            source_surface.setFrame_(NSMakeRect(12, strip_y, 666, strip_h))
             panel.addSubview_(source_surface)
-            badge = self.label(panel, summary, 26, 254, 638, 20, 14, PALETTE["green"])
+            badge = self.label(panel, summary, 26, badge_y, 638, 20, 14, PALETTE["green"])
             badge.setFont_(A.NSFont.boldSystemFontOfSize_(14))
-            self.label(panel, source, 26, 220, 638, 34, 11, PALETTE["muted"])
+            self.label(panel, source, 26, source_y, 638, 34, 11, PALETTE["muted"])
             fields = {}
-            for name, label, y in (("API_KEY", "密钥", 166), ("BASE_URL", "服务地址", 120), ("MODEL", "模型", 74)):
+            for name in ("API_KEY", "BASE_URL", "MODEL"):
+                label = {"API_KEY": "密钥", "BASE_URL": "服务地址", "MODEL": "模型"}[name]
+                y = field_ys[name]
                 row_label = self.label(panel, label, 26, y + 3, 78, 24, 11, PALETTE["text"])
                 row_label.setFont_(A.NSFont.boldSystemFontOfSize_(11))
                 cls = A.NSSecureTextField if name == "API_KEY" else A.NSComboBox if name == "MODEL" else A.NSTextField
@@ -108,7 +186,9 @@ class SettingsController(NSObject):
                 if name == "MODEL":
                     self.set_models(field, [])
                     field.setCompletes_(False)
-                    field.setPlaceholderString_("获取模型列表后选择，或手动填写模型名称")
+                    field.setPlaceholderString_(
+                        "从在线目录选择（不支持手填）" if orca
+                        else "获取模型列表后选择，或手动填写模型名称")
                 panel.addSubview_(field)
                 fields[name] = field
                 self.initial[f"{prefix}_{name}"] = value
@@ -116,8 +196,29 @@ class SettingsController(NSObject):
             self.fields[prefix] = fields
             hint = ("Jev 地址带不带 /v1 都行，网关动作不同时可填完整动作路径；列表接口不可用时可手填模型。" if prefix == "TYPESAFE"
                     else "可手填模型。Ollama 地址通常含 /v1，密钥可填 ollama。" if prefix == "OPENAI"
-                    else "使用 Anthropic 消息接口，支持自定义兼容服务地址。")
-            self.label(panel, hint, 26, 43, 638, 20, 11, PALETTE["muted"])
+                    else "使用 Anthropic 消息接口，支持自定义兼容服务地址。" if prefix == "ANTHROPIC"
+                    else "模型只能从在线目录选择；密钥与账号登录二选一即可，随时可切换。")
+            hint_label = self.label(panel, hint, 26, 43, 638, 20, 11, PALETTE["muted"])
+            if orca:
+                # Two explicit entrances, side by side, above the shared model dropdown.
+                auth_surface = ui_style.make_surface(10, PALETTE["row"], PALETTE["edge"])
+                auth_surface.setFrame_(NSMakeRect(12, 62, 666, 44))
+                panel.addSubview_(auth_surface)
+                self.label(panel, "接入方式", 26, 76, 68, 20, 11, PALETTE["text"])
+                self.orca_login_button = self.button(panel, "Connect with OrcaRouter", "orcaLogin:",
+                                                     104, 68, 206)
+                self.orca_login_button.setToolTip_(
+                    "在浏览器中用 OrcaRouter 账号授权，授权后自动写入密钥")
+                self.orca_login_button.setAccessibilityLabel_("Connect with OrcaRouter")
+                self.orca_cancel_button = self.button(panel, "取消登录", "orcaCancel:", 318, 68, 96)
+                self.orca_cancel_button.setEnabled_(False)
+                self.orca_cancel_button.setAccessibilityLabel_("取消 OrcaRouter 登录")
+                self.controls.extend((self.orca_login_button, self.orca_cancel_button))
+                self.orca_status = self.label(panel, "", 424, 78, 250, 20, 11, PALETTE["muted"])
+                hint_label.setStringValue_(
+                    "两种接入方式二选一：在上方粘贴已有 sk-orca-… 密钥，或点右侧按钮用账号登录；"
+                    "模型只能从在线目录选择。")
+                hint_label.setFrame_(NSMakeRect(26, 40, 638, 18))
             for text, action, x in (("获取模型列表", "fetchModels:", 372), ("测试连接", "testConnection:", 524)):
                 button = self.button(panel, text, action, x, 4, 140)
                 button.setTag_(index)
@@ -165,6 +266,179 @@ class SettingsController(NSObject):
         combo.addItemsWithObjectValues_(models or ["暂无"])
         combo.setStringValue_(current)
 
+    # ---------------------------------------------------------------- OrcaRouter
+
+    @objc.python_method
+    def orca_form(self):
+        return self.values("ORCAROUTER")
+
+    def orcaLogin_(self, sender):
+        """Entrance 2 — OAuth 2.0 + PKCE, Flow A (loopback), in a background thread."""
+        if self.busy or self.orca_login.busy:
+            return
+        self.window.makeFirstResponder_(None)
+        try:
+            base = config.validate_orcarouter_endpoint(self.orca_form()["BASE_URL"])
+        except ValueError as e:
+            self.set_status(str(e), "error")
+            return
+        generation = self.orca_login.begin()
+        self.orca_login_button.setEnabled_(False)
+        self.orca_cancel_button.setEnabled_(True)
+        self.orca_status.setStringValue_("正在打开浏览器…")
+        self.orca_status.setTextColor_(PALETTE["muted"])
+
+        def work():
+            source = orcarouter.PkceSource(base)
+            with self.orca_login._lock:
+                if generation != self.orca_login.generation:
+                    return
+                self.orca_login.source = source
+            try:
+                url = source.start()
+                if not self.orca_login.current(generation):
+                    return
+                self.orca_login.set_hint(generation, url)
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "orcaAuthorizeReady:", {"generation": generation, "url": url}, False)
+                cred = source.finish()
+            except orcarouter.LoginCancelled:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "orcaLoginFinished:", {"generation": generation, "cancelled": True}, False)
+                return
+            except orcarouter.OrcaRouterError as e:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "orcaLoginFinished:", {"generation": generation, "error": str(e)}, False)
+                return
+            except Exception as e:                       # never surface a raw traceback
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "orcaLoginFinished:",
+                    {"generation": generation, "error": f"{type(e).__name__}"}, False)
+                return
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "orcaLoginFinished:", {"generation": generation, "credential": cred}, False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def orcaAuthorizeReady_(self, info):
+        """The browser is about to open; also offer the URL for a browser that did not."""
+        generation = info["generation"]
+        if not self.orca_login.current(generation):
+            return
+        url = info["url"]
+        self.orca_status.setStringValue_("等待浏览器授权…（取消登录可中止）")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        # The URL is not a secret — it carries the challenge, never the verifier — but it is
+        # long, so it goes to the clipboard and the status line says where to find it.
+        try:
+            A.NSPasteboard.generalPasteboard().clearContents()
+            A.NSPasteboard.generalPasteboard().setString_forType_(url, A.NSPasteboardTypeString)
+            self.set_status("已在浏览器打开授权页；未自动打开时授权链接已复制到剪贴板。")
+        except Exception:
+            self.set_status("已在浏览器打开授权页；未自动打开时请重试。")
+
+    def orcaLoginFinished_(self, info):
+        generation = info["generation"]
+        if not self.orca_login.current(generation):
+            return                       # a newer attempt (or a cancel) already owns the UI
+        self.orca_login.settle(generation)
+        self.orca_login_button.setEnabled_(True)
+        self.orca_cancel_button.setEnabled_(False)
+        if info.get("cancelled"):
+            self.orca_status.setStringValue_("已取消登录。")
+            self.orca_status.setTextColor_(PALETTE["muted"])
+            return
+        if info.get("error"):
+            self.orca_status.setStringValue_("登录未完成。")
+            self.orca_status.setTextColor_(PALETTE["red"])
+            self.set_status(info["error"], "error")
+            return
+        credential = info["credential"]
+        try:
+            self.persist_orca_credential(credential)
+        except (ValueError, OSError) as e:
+            self.orca_status.setStringValue_("登录成功但写入失败。")
+            self.orca_status.setTextColor_(PALETTE["red"])
+            self.set_status(f"写入配置失败：{str(e)[:80]}", "error")
+            return
+        orcarouter.clear_reauth()
+        self.orca_status.setStringValue_("已登录，密钥已保存。")
+        self.orca_status.setTextColor_(PALETTE["green"])
+        self.set_status("已通过账号登录取得密钥并写入配置文件。重启应用后生效；"
+                        "如需撤销，可在 OrcaRouter 控制台的「已授权应用」中一键撤销。", "success")
+        self.refresh_orca_catalog()
+
+    def orcaCancel_(self, sender):
+        """Explicit cancel: clear UI state first, then stop the listener and the wait."""
+        if not self.orca_login.busy:
+            return
+        self.orca_login.release()
+        self.orca_login_button.setEnabled_(True)
+        self.orca_cancel_button.setEnabled_(False)
+        self.orca_status.setStringValue_("已取消登录。")
+        self.orca_status.setTextColor_(PALETTE["muted"])
+        self.set_status("已取消 OrcaRouter 登录。")
+
+    @objc.python_method
+    def persist_orca_credential(self, credential):
+        """Write the key through the project's existing guarded settings writer.
+
+        OrcaRouter's consent screen can be re-approved by the same person at any time, and
+        there is no way for this app to tell a pasted key from a signed-in one after the
+        fact — both are the same durable `sk-orca-…`. So the key replaces whatever is in the
+        file, and the account id is written alongside as a label. The old secret is not
+        deleted before this write succeeds; a failed write leaves the previous key intact.
+        """
+        changes = {f"{orcarouter.PREFIX}_API_KEY": credential.key,
+                   f"{orcarouter.PREFIX}_BASE_URL": config.validate_orcarouter_endpoint(
+                       self.orca_form()["BASE_URL"])}
+        if credential.account:
+            changes["ORCAROUTER_ACCOUNT_ID"] = credential.account
+        self.original = config.write_settings(self.path, self.original, changes)
+        self.file_values.update(changes)
+        for name, value in (("API_KEY", credential.key),
+                            ("BASE_URL", changes[f"{orcarouter.PREFIX}_BASE_URL"])):
+            self.fields["ORCAROUTER"][name].setStringValue_(value)
+            self.initial[f"ORCAROUTER_{name}"] = value
+
+    @objc.python_method
+    def refresh_orca_catalog(self, capability="chat", require_input=""):
+        """Ask the live catalog for one capability; never a free-text model field."""
+        values = self.orca_form()
+        base = values["BASE_URL"]
+        key = values["API_KEY"]
+        if key and not orcarouter.looks_like_key(key):
+            self.set_status("密钥格式不像 sk-orca-… 开头的 OrcaRouter 密钥，请检查。", "error")
+            return
+        catalog = config.list_orcarouter_models(base, key, capability, require_input)
+        self.apply_orca_catalog(catalog, capability, require_input)
+
+    @objc.python_method
+    def apply_orca_catalog(self, catalog, capability="chat", require_input=""):
+        """Bind the filtered catalog to the dropdown and report where it came from."""
+        self.orca_catalog_state = {"source": catalog.source, "degraded": catalog.degraded,
+                                   "error": catalog.error}
+        models = orcarouter.selector_options(catalog)
+        self.orca_models[f"{capability}+{require_input}".rstrip("+")] = models
+        combo = self.fields["ORCAROUTER"]["MODEL"]
+        value, invalidated = orcarouter.selection_after_catalog(combo.stringValue(), models)
+        self.set_models(combo, models)
+        combo.setStringValue_(value)
+        if invalidated:
+            # A model that is no longer offered (or no longer fits the required capability)
+            # must not stay selected: clear it and say why.
+            self.set_status("原模型不在当前目录中，已清空，请重新选择。", "error")
+        elif catalog.degraded:
+            self.set_status(f"在线目录不可用（{catalog.error}），"
+                            f"当前显示已验证的备用清单 {len(models)} 个。", "error")
+        else:
+            self.set_status(f"已获取 {len(models)} 个可用模型（能力：{capability}"
+                            + (f"，输入：{require_input}" if require_input else "") + "）。",
+                            "success")
+
     def comboBoxWillPopUp_(self, notification):
         self.model_before_popup = notification.object().stringValue()
 
@@ -182,6 +456,18 @@ class SettingsController(NSObject):
             source = userconfig.source_of("TYPESAFE_API_KEY", "JEV_API_KEY")
             summary = ("本次启动：正在使用自己的 Jev 密钥" if source != "none"
                        else "本次启动：正在使用本地判断模型，未使用 Jev 密钥")
+        elif prefix == "ORCAROUTER":
+            cred = orcarouter.resolve_credential()
+            if cred.present:
+                entrance = ("账号登录（OAuth 2.0 + PKCE）" if cred.source == "pkce"
+                            else "手填密钥")
+                summary = f"本次启动：正在使用 OrcaRouter 密钥（{entrance}）"
+                if orcarouter.needs_reauth(cred):
+                    summary = "本次启动：OrcaRouter 密钥已被服务端拒绝，需重新登录"
+                source = f"密钥：{orcarouter.mask(cred.key)}\n推理地址：{orcarouter.api_base()}"
+            else:
+                summary = "本次启动：未配置 OrcaRouter 密钥"
+                source = f"推理地址：{orcarouter.api_base()}"
         else:
             oai = userconfig.provider("OPENAI")
             anth = userconfig.provider("ANTHROPIC")
@@ -307,10 +593,13 @@ class SettingsController(NSObject):
 
     def controlTextDidChange_(self, notification):
         field = notification.object()
-        for fields in self.fields.values():
+        for prefix, fields in self.fields.items():
             if field in (fields["API_KEY"], fields["BASE_URL"]):
                 combo = fields["MODEL"]
                 self.set_models(combo, [])
+                if prefix == "ORCAROUTER" and field is fields["API_KEY"]:
+                    self.set_status("密钥已修改，请重新获取模型列表；保存后重启生效。")
+                    return
         self.set_status("配置已修改，请重新测试；保存后重启生效。")
 
     def saveSettings_(self, sender):
@@ -329,10 +618,15 @@ class SettingsController(NSObject):
                 if any(k.startswith(prefix + "_") for k in changes):
                     vals = self.values(prefix)
                     if vals["API_KEY"] and (not vals["BASE_URL"].strip() or not vals["MODEL"].strip()):
+                        if prefix == "ORCAROUTER":
+                            raise ValueError("填写密钥后，请同时填写地址并选择模型。")
                         raise ValueError("填写密钥后，请同时填写该服务的地址和模型。")
             for key, value in changes.items():
                 if key.endswith("_BASE_URL") and value:
-                    config.validate_endpoint(value)
+                    if key.startswith("ORCAROUTER_"):
+                        config.validate_orcarouter_endpoint(value)
+                    else:
+                        config.validate_endpoint(value)
             self.original = config.write_settings(self.path, self.original, changes)
         except ValueError as e:
             self.set_status(str(e), "error")
@@ -358,6 +652,39 @@ class SettingsController(NSObject):
         prefix = config.PREFIXES[index]
         values = self.values(prefix)
         try:
+            if prefix == "ORCAROUTER":
+                config.validate_orcarouter_endpoint(values["BASE_URL"])
+                if not values["API_KEY"]:
+                    raise ValueError("请填写密钥，或点击「Connect with OrcaRouter」用账号登录。")
+                if not listing and not values["MODEL"].strip():
+                    raise ValueError("请先从在线目录选择模型，再测试连接。")
+                if not listing:
+                    config.test_connection(prefix, values["BASE_URL"], values["API_KEY"],
+                                           values["MODEL"])
+                    self.set_status("连接成功：OrcaRouter 返回了有效结果。"
+                                    "配置尚需保存并重启生效。", "success")
+                    return
+                # The capability-filtered live catalog is the only source for the
+                # OrcaRouter dropdown. It goes out on a worker thread like every other
+                # provider request: a catalog fetch must not freeze the window.
+                self.busy = True
+                for control in self.controls:
+                    control.setEnabled_(False)
+                self.set_status("正在获取模型列表…")
+
+                def list_orca():
+                    try:
+                        catalog = config.list_orcarouter_models(
+                            values["BASE_URL"], values["API_KEY"])
+                        result = {"index": index, "listing": True, "orca": catalog}
+                    except Exception as e:                 # noqa: BLE001
+                        result = {"index": index, "listing": True,
+                                  "error": config.error_message(e)}
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        "requestFinished:", result, False)
+
+                threading.Thread(target=list_orca, daemon=True).start()
+                return
             config.validate_endpoint(values["BASE_URL"])
             if not values["API_KEY"]:
                 raise ValueError("请填写密钥；Ollama 可填写 ollama。")
@@ -375,6 +702,9 @@ class SettingsController(NSObject):
             return
         except ValueError as e:
             self.set_status(str(e), "error")
+            return
+        except Exception as e:
+            self.set_status(config.error_message(e), "error")
             return
         if listing:
             combo = self.fields[prefix]["MODEL"]
@@ -401,6 +731,9 @@ class SettingsController(NSObject):
         self.busy = False
         for control in self.controls:
             control.setEnabled_(True)
+        if "orca" in result:
+            self.apply_orca_catalog(result["orca"])
+            return
         if result.get("error"):
             self.set_status(result["error"] + (" 模型仍可手填。" if result["listing"] else ""), "error")
         elif result["listing"]:
@@ -414,6 +747,10 @@ class SettingsController(NSObject):
         if self.busy:
             self.set_status("请求进行中，请等待结果后关闭。")
             return False
+        # Leaving the window ends any authorization attempt: clear busy/hint synchronously
+        # and stop the loopback listener, rather than leaving the socket and the panel
+        # state alive for a window nobody is looking at.
+        self.release_orca_login()
         if self.changed():
             alert = A.NSAlert.alloc().init()
             alert.setMessageText_("放弃尚未保存的配置？")
@@ -422,11 +759,46 @@ class SettingsController(NSObject):
             return alert.runModal() == A.NSAlertSecondButtonReturn
         return True
 
+    def windowWillClose_(self, notification):
+        self.release_orca_login()
+
+    def tabView_didSelectTabViewItem_(self, tab_view, item):
+        """Switching provider tabs abandons an in-flight OrcaRouter login.
+
+        This fires while the tab items are being added, before the OrcaRouter page has
+        built its buttons, so every widget here is looked up defensively.
+        """
+        if item.identifier() != "ORCAROUTER":
+            self.release_orca_login()
+
+    @objc.python_method
+    def release_orca_login(self):
+        """One teardown path for cancel, tab switch, window close and app termination."""
+        self.orca_login.release()
+        for name, enabled, text in (("orca_login_button", True, ""),
+                                    ("orca_cancel_button", False, ""),
+                                    ("orca_status", None, "")):
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            if enabled is not None:
+                widget.setEnabled_(enabled)
+            elif text:
+                widget.setStringValue_(text)
+        status = getattr(self, "orca_status", None)
+        if status is not None:
+            status.setStringValue_("")
+
+    def applicationWillTerminate_(self, notification):
+        self.release_orca_login()
+
 
 if __name__ == "__main__":
     app = A.NSApplication.sharedApplication()
     app.setActivationPolicy_(A.NSApplicationActivationPolicyRegular)
     userconfig.load()
     controller = SettingsController.alloc().init().build()
+    # The app delegate so a quit runs the same login teardown as closing the window.
+    app.setDelegate_(controller)
     controller.show()
     app.run()

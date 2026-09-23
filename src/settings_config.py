@@ -11,16 +11,24 @@ import tempfile
 import urllib.error
 import urllib.parse
 
+import orcarouter
 import userconfig
 from generate import _endpoint, base_is_verbatim_action, http_post_json, jev_request_url, Generator, ThinkingOnlyError
 
-PREFIXES = ("TYPESAFE", "OPENAI", "ANTHROPIC")
+PREFIXES = ("TYPESAFE", "OPENAI", "ANTHROPIC", "ORCAROUTER")
 FIELDS = ("API_KEY", "BASE_URL", "MODEL")
 DEFAULTS = {
     "TYPESAFE": ("https://api.typesafe.ai", "jev-latest"),
     "OPENAI": ("https://api.openai.com/v1", ""),
     "ANTHROPIC": ("https://api.anthropic.com", ""),
+    # OrcaRouter's model comes from the live catalog, so no default is offered here; the
+    # neutral routing model is only what a headless configuration falls back to.
+    "ORCAROUTER": (orcarouter.API_BASE_DEFAULT, ""),
 }
+# Written through the same guarded editor as the provider groups. ORCAROUTER_ACCOUNT_ID
+# records which account a signed-in key belongs to — a label for the status line and for
+# attributing a rejected credential, never a second credential.
+EXTRA_KEYS = ("ORCAROUTER_ACCOUNT_ID",)
 ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z_0-9]*)(\s*=\s*)(.*)$")
 
 
@@ -37,7 +45,8 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
         raise ValueError("配置文件已被其他程序修改，请关闭设置窗口后重新打开。")
     # JUDGE_BACKEND is the first-run dialog's choice (judge.download_block_reason);
     # the settings window's offline-model section writes it through the same guarded path.
-    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {"JUDGE_BACKEND"}
+    allowed = ({f"{p}_{f}" for p in PREFIXES for f in FIELDS}
+               | {"JUDGE_BACKEND"} | set(EXTRA_KEYS))
     if not changes.keys() <= allowed:
         raise ValueError("不支持的配置项。")
     for value in changes.values():
@@ -81,8 +90,30 @@ def validate_endpoint(base: str) -> str:
     return base
 
 
+def validate_orcarouter_endpoint(base: str) -> str:
+    """OrcaRouter's own origin rule: HTTPS anywhere, HTTP only for loopback."""
+    try:
+        return orcarouter.validate_origin(base, "OrcaRouter 服务地址")
+    except ValueError as exc:
+        raise ValueError("OrcaRouter 服务地址需为 https 地址（本机地址可用 http）。") from exc
+
+
+def list_orcarouter_models(base: str, key: str, capability: str = "chat",
+                           require_input: str = "", refresh: bool = True):
+    """Capability-filtered live catalog. Returns an orcarouter.Catalog, never raises.
+
+    The dropdown for OrcaRouter is built from this and only this: the live catalog when it
+    answers, and an explicitly labelled verified fallback when it does not. The caller must
+    not turn either case into a free-text model field.
+    """
+    base = validate_orcarouter_endpoint(base)
+    return orcarouter.catalog().fetch(base, key, capability, require_input, refresh)
+
+
 def list_models(prefix: str, base: str, key: str) -> list[str]:
     """GET the provider's models endpoint. No presets, redirects or alternate service."""
+    if prefix == "ORCAROUTER":
+        raise ValueError("OrcaRouter 的模型列表按能力筛选，请使用 list_orcarouter_models。")
     base = validate_endpoint(base)
     if not key:
         raise ValueError("请先填写密钥；Ollama 可填写 ollama。")
@@ -130,7 +161,8 @@ def list_models(prefix: str, base: str, key: str) -> list[str]:
 
 def test_connection(prefix: str, base: str, key: str, model: str, extra: dict | None = None) -> None:
     """Use exactly the unsaved form values; never fall back to built-in credentials."""
-    base = validate_endpoint(base)
+    base = (validate_orcarouter_endpoint(base) if prefix == "ORCAROUTER"
+            else validate_endpoint(base))
     if not key or not model.strip():
         raise ValueError("请填写密钥和模型后再测试。")
     if prefix == "TYPESAFE":
@@ -154,17 +186,46 @@ def test_connection(prefix: str, base: str, key: str, model: str, extra: dict | 
         # Testing must exercise the model the user selected, not an extra-body override.
         body.update(model=model, stream=False)
         headers["authorization"] = f"Bearer {key}"
-    data = http_post_json(_endpoint(base, api), headers, body, 30)
-    if api == "anthropic":
-        raw = "".join(p.get("text", "") for p in data.get("content", []) if isinstance(p, dict))
-    else:
+    if prefix == "ORCAROUTER":
+        # Same request the generation layer sends (src/orcarouter.chat_request), so a
+        # model that tests well here cannot fail at run time.
+        try:
+            data = orcarouter.chat_request(base, key, model, body["messages"],
+                                           max_tokens=300, timeout=30)
+        except urllib.error.HTTPError as exc:
+            raise OrcaRouterHTTPError(exc.code) from exc
         raw = Generator._openai_json(data, model, "非思考模型")
+    else:
+        data = http_post_json(_endpoint(base, api), headers, body, 30)
+        if api == "anthropic":
+            raw = "".join(p.get("text", "") for p in data.get("content", []) if isinstance(p, dict))
+        else:
+            raw = Generator._openai_json(data, model, "非思考模型")
     if not raw.strip():
         raise ValueError("服务未返回文字；请检查模型是否支持生成，或关闭思考模式。")
 
 
+class OrcaRouterHTTPError(Exception):
+    """A rejected OrcaRouter request, carrying only the status code.
+
+    The relay's error bodies are not shown: they can echo request details, and the user
+    only needs to know whether to retry, fix the key, or sign in again.
+    """
+
+    def __init__(self, status: int):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
 def error_message(error: Exception) -> str:
     """Never display raw remote bodies, URLs or exception strings containing credentials."""
+    if isinstance(error, OrcaRouterHTTPError):
+        if error.status in (401, 403):
+            return (f"HTTP {error.status}：密钥无效或无权使用该模型。"
+                    "可在设置窗口重新登录，或到 OrcaRouter 控制台确认密钥权限。")
+        if error.status == 429:
+            return "HTTP 429：请求过于频繁，请稍后重试。"
+        return f"HTTP {error.status}：OrcaRouter 未接受该请求，请检查模型名与账户额度。"
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP {error.code}：请检查地址、密钥及模型权限。"
     if isinstance(error, ThinkingOnlyError):

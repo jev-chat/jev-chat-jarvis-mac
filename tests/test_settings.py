@@ -56,7 +56,11 @@ class SettingsFiles(unittest.TestCase):
         from generate import load_credentials
         oai = {'key': '', 'base': '', 'model': '', 'source': 'none'}
         anth = {'key': 'custom', 'base': 'https://example.invalid/gateway', 'model': 'model', 'source': 'test'}
-        with patch.object(userconfig, 'provider', side_effect=lambda p: oai if p == 'OPENAI' else anth):
+        # Third group added by the OrcaRouter integration: it is consulted last, so this
+        # mock answers "no key" for it and the two-provider precedence below is unchanged.
+        orca = {'key': '', 'base': '', 'model': '', 'source': 'none'}
+        providers = {'OPENAI': oai, 'ANTHROPIC': anth, 'ORCAROUTER': orca}
+        with patch.object(userconfig, 'provider', side_effect=lambda p: providers[p]):
             self.assertEqual(load_credentials()[-1], 'anthropic')
             oai.update(key='own', base='https://example.invalid/anthropic-name', model='other')
             self.assertEqual(load_credentials()[-1], 'openai')

@@ -25,8 +25,17 @@ Ollama 自己的目录（`~/.ollama`），由 Ollama 自行管理，本项目不
 
 ### 方式二（推荐）：配置你自己的 API key
 
-按 README「配置」一节填 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`（DeepSeek、智谱等均可）。
+按 README「配置」一节填 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`（DeepSeek、智谱等均可），
+或用 **OrcaRouter** 网关的 `ORCAROUTER_API_KEY`（`sk-orca-…`，在
+[OrcaRouter 控制台](https://www.orcarouter.ai/console/token) 申请，或在模型设置窗口点
+「Connect with OrcaRouter」用账号授权取得）。
 此时聊天文字**直接从你的电脑发送给你自己选择的服务商**，不经过本项目作者的任何服务器。
+
+用 OrcaRouter 时，聊天文字发送到 `https://api.orcarouter.ai/v1`，再由该网关按其路由规则转给
+背后的模型服务商；密钥属于你自己的 OrcaRouter 账号，可在
+[已授权应用](https://www.orcarouter.ai/console/authorized-apps) 一键撤销。账号登录（OAuth 2.0
++ PKCE）过程中本应用不会看到你的密码，换回的也是一把普通的 `sk-orca-…` 密钥，保存在同一个
+`~/.config/jev-jarvis/env`（权限 600）。
 
 ### 方式三（零配置）：内置免费通道
 

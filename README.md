@@ -62,14 +62,18 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 
 ### 可视化配置（#18）
 
-点击悬浮窗右上角 **齿轮图标（模型设置）**，或菜单栏 **J → 模型设置…**，可编辑 Jev、OpenAI 兼容、Anthropic 兼容三组密钥、服务地址与模型。
+点击悬浮窗右上角 **齿轮图标（模型设置）**，或菜单栏 **J → 模型设置…**，可编辑 Jev、OpenAI 兼容、Anthropic 兼容、OrcaRouter 四组密钥、服务地址与模型。
 设置窗口显示在悬浮窗上方，不会被面板遮挡。**保存后必须退出并重新打开应用**；保存不会切换本次运行的配置。
 
 - 窗口编辑 `$XDG_CONFIG_HOME/jev-jarvis/env`（未设置时为 `~/.config/jev-jarvis/env`），显示具体路径。只修改所编辑服务的字段，保留其他配置、注释和未识别行，文件权限设为 `600`。文件被其他程序修改时拒绝覆盖，需重新打开窗口。
 - 填好地址与密钥，点击「获取模型列表」从该服务的 `/models` 接口动态获取，再下拉选择；不内置模型清单。Jev 按官方 `models[].name` 读取（当前列表为别名，未列出的版本号仍可手填）；OpenAI/Anthropic 按 `data[].id` 读取。接口不支持、失败或返回空列表时明确提示，仍可手填，不自动换模型或服务。空下拉显示「暂无」（仅作提示，不作为模型保存或调用），仍可手填；底部动态提示以蓝色显示进行状态、绿色显示成功、红色显示错误。列表可见不代表一定有生成权限，选定后再测试。
+- **OrcaRouter 页**（网关，一个端点后面是很多家模型）：密钥和账号登录**二选一**，两种方式最终都只产生一把普通的 `sk-orca-…` 密钥，属于你自己的账号，随时可在 OrcaRouter 控制台撤销。模型**只能从在线目录选择，不支持手填**——目录按当前入口的能力过滤（文本生成只看能说 chat 的模型，多模态入口只看明确声明了对应输入模态的模型）。目录拉取失败时显示明确标注的**已验证备用清单**并提示原因，不会退回自由输入。切换密钥、地址或能力后重新过滤；已选模型不再兼容时会清空并提示重选。
+  - **粘贴密钥**：在「密钥」栏填入 `sk-orca-…`。密钥只写进上面那个 env 文件，不写日志、不进错误信息、不上屏完整内容。
+  - **Connect with OrcaRouter**：点按钮后用浏览器授权（OAuth 2.0 + PKCE，S256，不需要 client secret，也不需要预注册回调地址）。本机监听 `127.0.0.1` 的临时端口接收授权码；浏览器没自动打开时授权链接会复制到剪贴板。授权成功后密钥自动写入配置文件，**下次启动直接复用**，不会每次重新授权（OrcaRouter 对每个用户每 24 小时最多签发 10 个登录密钥）。点「取消登录」、切换页签或关闭窗口都会中止本次登录。
+  - 密钥被 OrcaRouter 撤销后，请求返回 `401`，该账号会被标记为「需要重新登录」；这里**不会**做任何自动刷新（OrcaRouter 发的是长期密钥，不是 refresh token），重新登录或换一把密钥即可。
 - 「测试连接」使用窗口内**尚未保存**的地址、密钥和模型发起实际调用，仅发送固定问候语，不读取微信内容；可能产生少量服务费用。生成层必须返回非空文字才算成功，不能用 `--check` 的配置解析成功代替连接成功。
 - 密钥掩码显示；窗口仅读取所编辑文件中的值，不把环境变量、项目 `.env` 或内置共享密钥复制进用户文件。各配置页顶部突出显示本次启动正在使用自己的密钥、内置共享密钥或本地判断，以及实际来源；生成页同时标明当前启用的服务，优先级保留在窗口下方。
-- 环境变量优先于用户 env，用户 env 优先于项目 `.env`；生成层 OpenAI 组优先于 Anthropic 组，均未配置才使用内置共享密钥。清空当前文件的密钥不会禁用其他来源中的密钥。由终端或启动器导出的值也显示为「环境变量」。
+- 环境变量优先于用户 env，用户 env 优先于项目 `.env`；生成层 OpenAI 组优先于 Anthropic 组，OrcaRouter 组排在这两组之后，三组都没有才使用内置共享密钥。清空当前文件的密钥不会禁用其他来源中的密钥。由终端或启动器导出的值也显示为「环境变量」。
 - API 格式由密钥组决定：`OPENAI_*` 使用 OpenAI 格式，`ANTHROPIC_*` 使用 Anthropic 格式；自定义地址不需要包含服务名称。Ollama 可填 `http://localhost:11434/v1`、密钥 `ollama`，模型从本地服务获取或手填。Jev 地址带不带末尾 `/v1` 都行，与手动配置共用同一条拼接规则。
 - 钥匙串：不新增钥匙串读写。如果原 env 用 `$(security find-generic-password …)` 等 shell 表达式提供密钥，窗口不执行表达式、不展示其内容，未输入新密钥时保留原行；仍由已有启动器执行。要在窗口测试该服务，需明确输入密钥；保存将用输入值替换原表达式。外部注入的密钥继续遵循环境变量优先级。
 - `JEV_BOXES`、`JEV_TONES`、`OPENAI_EXTRA_BODY` 暂仍通过 env 配置，保存窗口不会改动它们。OpenAI 连接测试沿用当前启动的 `OPENAI_EXTRA_BODY`；完整话术管理等留待后续扩展。
@@ -88,11 +92,18 @@ export OPENAI_BASE_URL="https://api.deepseek.com"
 export OPENAI_MODEL="deepseek-chat"
 # 端点的思考模式要靠额外字段关时填（Qwen3 这类不关会慢几十倍）
 # export OPENAI_EXTRA_BODY='{"enable_thinking":false}'
+
+# 生成层（可选）：OrcaRouter 网关，一个端点后面是很多家模型
+# 密钥在 https://www.orcarouter.ai/console/token 申请，或在设置窗口点账号登录
+export ORCAROUTER_API_KEY="sk-orca-你的key"
+# export ORCAROUTER_BASE_URL="https://api.orcarouter.ai/v1"
+# export ORCAROUTER_MODEL="deepseek/deepseek-v4-flash"
 ENV
 chmod 600 ~/.config/jev-jarvis/env
 ```
 
 - **凭据解析以 key 为准**：提供 key 的来源同时决定端点和模型。实测可用：DeepSeek `deepseek-chat`（最快）；智谱 `glm-4-flash`（换 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`，两组都填 OpenAI 组优先）；本地 Ollama `qwen2.5:7b`（完全不出网）
+- **OrcaRouter**：`ORCAROUTER_API_KEY` + `ORCAROUTER_BASE_URL`（默认 `https://api.orcarouter.ai/v1`）+ `ORCAROUTER_MODEL`（模型 ID 保留 `厂商/模型` 形式，如 `deepseek/deepseek-v4-flash`）。模型清单以 `GET {ORCAROUTER_BASE_URL}/models` 为准，设置窗口里按能力过滤后下拉选择。自建/自托管部署可只设 `ORCAROUTER_ORIGIN`（认证与推理同一个源），或用 `ORCAROUTER_AUTH_BASE_URL` / `ORCAROUTER_BASE_URL` 分别覆盖（显式覆盖优先）；非本机地址强制 https
 - **判断层网关**：`TYPESAFE_BASE_URL` 三种填法等价可用——只到主机（`https://api.typesafe.ai`）、带版本段（`…/v1`，自动补动作段，不会出现 `/v1/v1/…`）、或填完整动作路径（填到动作段为止，原样使用、不再拼接）。第三方 TypeSafe 兼容网关填网关地址 + 网关 key，模型名按网关填写（如 Vercel AI Gateway 填 `https://ai-gateway.vercel.sh/v1/evaluate`、模型 `typesafe-ai/jev`；OpenRouter 填 `https://openrouter.ai/api/alpha/decisions`、模型 `typesafe/jev-1.13`，key 用 OpenRouter 的 `sk-or-…`，响应同为 systemone 形状）
 - **判断方式选择（`JUDGE_BACKEND`）**：首次启动（未配判断层 key 且离线模型未下载）会弹一次选择，结果写进 env：`cloud`=在线判断（不下载、不加载本地模型）、`local`=离线判断（预热时下载，选过就不再问）、`skip`=稍后再说（不再弹，消息时面板提示）。不写此键时：模型已在本地就照常使用，未下载则**不会自动下载**，面板提示引导。模型设置的「判断 · Jev」页可删除离线模型（显示实际占用）或启用离线判断
 - **别用 thinking 模型**：思考吃光 `max_tokens`，候选 0 条，面板只报「候选生成失败」——DeepSeek 认准 `deepseek-chat`
