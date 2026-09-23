@@ -28,6 +28,7 @@ gh issue comment <n> --body "认领：<一句话说打算怎么修>"
 - **一个 PR 只做一件事**。commit 用 Conventional Commits + 中文描述：`fix(perception): …` / `feat(generate): …` / `docs: …`。
 - PR 描述写清三件事：改了什么、为什么改、怎么测的（有实测数字写实测数字）；关联 issue 用 `Closes #n` 写在描述里，**不写进 commit 标题**（squash 合并会自动追加 PR 号，双编号分不清）。
 - 合并统一 squash，一个 issue 对应 master 上一个干净提交。
+- **合并走合并队列**：PR 的 CI 绿后点「Merge when ready」排队（也可先勾 Enable auto-merge，绿了自动排）。master 有新提交**不用**手动回合自己的分支——队列只对合并结果跑一次检查，分支过期会自动重测，冲突会被踢出队列并通知。
 - PR 出现冲突：`git fetch origin master && git rebase origin/master` 就地解决、自测跑过再 push，**不要**在 GitHub 网页上手改文件绕过（跳过了本地自测）。
 - **代解前先声明**：冲突原则上由 PR 作者自己 rebase 解决；维护者或其他 AI 会话想代解，必须先在 PR 里评论说一声「我来解冲突」，避免两条线同时在解、互相强推顶掉（#36 的实际教训）。
 - **fork PR 勾选允许维护者修改**：从 fork 提 PR 时勾选「Allow edits by maintainers」，维护者才能代为解决冲突或顺手小修，否则只能等你回来 rebase。

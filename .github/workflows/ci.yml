@@ -7,6 +7,10 @@ on:
     branches: [master]
   push:
     branches: [master]
+  # 合并队列：对「队列批量合并结果」跑同一套检查（PR 自身的 pull_request CI 照旧，
+  # pullfrog 自动评审挂在那条上不受影响）；增量门禁仅 pull_request，队列跑不到、也不该跑
+  merge_group:
+    types: [checks_requested]
 
 # 同一分支的新 run 取消同 ref 的旧 run，省排队时间
 concurrency:
