@@ -23,7 +23,10 @@ jobs:
     # 本地实测全套 <2s，超时给的是冷缓存装依赖（torch 较大）的余量
     timeout-minutes: 15
     steps:
+      # 完整历史：PR 上的增量覆盖率门禁需要 origin/master 做对比基线（浅克隆没有它）
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       # 注：setup-uv 自 v8 起不再发布 @v8 这类 major tag，须 pin 完整版本号
       - name: Install uv
@@ -31,7 +34,25 @@ jobs:
         with:
           enable-cache: true
 
-      - name: 离线回归
-        # --locked:uv.lock 与 pyproject.toml 不一致时直接失败，不许静默重解析
-        # （防「本地能跑 CI 挂」或反向漂移；本地开发用不带 --locked 的 uv run 不受影响）
-        run: uv run --locked python -B -m unittest discover -s tests
+      # 覆盖率基线棘轮：ci/coverage-min.txt 只许人工上调、原则上不下调，跌破即红。
+      # 首次基线 44 = 2026-09-24 实测 src 口径 45%（5102 语句，排除自测脚本）留 ~1pt
+      # 缓冲吸收平台抖动；覆盖率涨了就随同一个 PR 上调门槛文件，把增量焊死。
+      # coverage/diff-cover 临时注入（uv --with），不动 pyproject.toml。
+      - name: 离线回归（覆盖率统计 + 基线门禁）
+        run: |
+          set -o pipefail
+          uv run --locked --with coverage coverage run --source=src -m unittest discover -s tests
+          uv run --locked --with coverage coverage report \
+            --omit=src/judge_zh_test.py \
+            --fail-under="$(cat ci/coverage-min.txt)"
+          uv run --locked --with coverage coverage xml --omit=src/judge_zh_test.py -o coverage.xml
+
+      # 增量覆盖率门禁（仅 PR）：相对 origin/master 的改动/新增行 ≥80% 须被测试触达，
+      # 存量零追缴（存量由上面的全局基线管，这里只管增量）。master push 无增量语义，
+      # 跳过；diff 里无 Python 改动时直接绿，纯 CI/文档 PR 不误伤。
+      - name: 增量覆盖率门禁（改动行 ≥80%，仅 PR）
+        if: github.event_name == 'pull_request'
+        # pipefail：门禁退出码不许被吞，红就是红
+        run: |
+          set -o pipefail
+          uv run --locked --with diff-cover diff-cover coverage.xml --compare-branch origin/master --fail-under=80

@@ -33,7 +33,7 @@ gh issue edit <n> --add-assignee @me
 - **代解前先声明**：冲突原则上由 PR 作者自己 rebase 解决；维护者或其他 AI 会话想代解，必须先在 PR 里评论说一声「我来解冲突」，避免两条线同时在解、互相强推顶掉（#36 的实际教训）。
 - **fork PR 勾选允许维护者修改**：从 fork 提 PR 时勾选「Allow edits by maintainers」，维护者才能代为解决冲突或顺手小修，否则只能等你回来 rebase。
 
-## 自测要求（CI 只管离线回归，其余绿灯就是你自己）
+## 自测要求（CI 管离线回归 + 覆盖率门禁，其余绿灯就是你自己）
 
 离线回归由 CI 在 PR 和 master push 上自动执行（`.github/workflows/ci.yml`），红灯不许合。其余层按层自测，**改哪层跑哪层**：
 
@@ -44,6 +44,20 @@ gh issue edit <n> --add-assignee @me
 | 发出消息识别 / 回复目标切换（`perception.py` + `hud.py`） | `uv run python -B -m unittest discover -s tests`——离线回归（合成 OCR，不读屏、不调 API、不读凭据） |
 | 生成层 `generate.py` | `uv run python src/generate.py --check`（凭据解析）+ 真跑一条候选生成确认非空 |
 | 悬浮窗/轮询 `hud.py` | 起真应用走一轮完整流程：消息出现 → 判断 → 候选上屏 → 一键填入 |
+
+CI 还带两道**覆盖率门禁**（2026-09 起）：
+
+- **全局基线棘轮**：总覆盖率跌破 `ci/coverage-min.txt` 里的基线即红。基线只许随 PR 上调（覆盖率涨了顺手把数字改大），原则上不下调——降基线等同回退，review 会拦。
+- **增量门禁（仅 PR）**：相对 `origin/master` 的改动/新增行 ≥80% 要被测试触达，存量零追缴；纯 CI/文档改动不受影响。
+
+本地自查（与 CI 同款命令）：
+
+```bash
+uv run --locked --with coverage coverage run --source=src -m unittest discover -s tests
+uv run --locked --with coverage coverage report --omit=src/judge_zh_test.py --fail-under="$(cat ci/coverage-min.txt)"
+uv run --locked --with coverage coverage xml --omit=src/judge_zh_test.py -o coverage.xml
+uv run --locked --with diff-cover diff-cover coverage.xml --compare-branch origin/master --fail-under=80
+```
 
 几条必守（都是实测过的教训，动手前先读对应源码顶部注释）：
 
