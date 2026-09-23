@@ -1,4 +1,13 @@
-# PULLFROG ACTION — DO NOT EDIT EXCEPT WHERE INDICATED
+# Pullfrog agent：手动 dispatch 直接跑；PR 的 CI 绿了之后自动跟进做 AI 评审。
+#
+# 自动路径的安全模型（不要破坏）：
+# - workflow_run 在主仓库可信上下文执行（读得到 secrets 与官方 token），因此
+#   checkout 只允许两种东西：默认分支（手动 dispatch），或 GitHub 生成的
+#   merge ref（refs/pull/<N>/merge，自动评审）。**不要 checkout fork PR 的
+#   head 代码**，也不要给 checkout 开 allow-unsafe-pr-checkout——那等于把本
+#   workflow env 里的 API key 交给外来 PR 代码（pwn request）。
+# - 自动评审只挂一把 provider key，需要换 provider 就改那一行（secret 先配好）。
+# - 触发器按 workflow 名字关联 ci.yml（workflows: [CI]），那边改 name 这里要同步。
 name: Pullfrog
 run-name: ${{ inputs.name || github.workflow }}
 on:
@@ -7,21 +16,27 @@ on:
       prompt:
         type: string
         description: Agent prompt
+        required: false
       name:
         type: string
         description: Run name
-  # PR 的 CI 通过后自动跟进；workflows 按名字匹配 ci.yml 的 name: CI（改名需同步）
   workflow_run:
     workflows: [CI]
     types: [completed]
+
+# CI 连续重跑时取消同一目标的旧评审
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  pullfrog:
+  agent:
     runs-on: ubuntu-latest
-    # 手动 dispatch 直接跑；workflow_run 只在「CI 由 PR 触发且成功」时跟进
+    timeout-minutes: 20
+    # 手动 dispatch 直接跑；自动路径只在「CI 由 PR 触发且成功」时跟进
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -29,63 +44,83 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      issues: write        # PR 评论走 issues API
+      pull-requests: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-          # workflow_run 触发时默认检出的是 master，必须显式指向触发 run 的 PR 提交
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: 定位 PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PR=$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "head_sha=$HEAD_SHA 未关联到 open PR，跳过"
+            echo "number=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          INFO=$(gh pr view "$PR" --json state,mergeable,author --jq '"\(.state)|\(.mergeable)|\(.author.login)"')
+          STATE="${INFO%%|*}"; REST="${INFO#*|}"; MERGEABLE="${REST%%|*}"; AUTHOR="${REST#*|}"
+          if [ "$STATE" != "OPEN" ] || [ "$MERGEABLE" != "MERGEABLE" ]; then
+            echo "PR #$PR 状态 $STATE/$MERGEABLE（需 OPEN 且可合并），跳过评审"
+            echo "number=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "$AUTHOR" in
+            *"[bot]")
+              echo "PR #$PR 作者为 bot（$AUTHOR），跳过评审（防自评审循环）"
+              echo "number=" >> "$GITHUB_OUTPUT"; exit 0;;
+          esac
+          echo "评审目标：PR #$PR（作者 $AUTHOR）"
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      # 手动 dispatch 检出当前分支；自动路径检出 GitHub 生成的 merge ref
+      # （原生 git 拉取，不经过 actions/checkout 的 workflow_run+fork 拒绝逻辑，
+      # 也不需要任何 unsafe 开关）
+      - name: Checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          PR="${{ steps.pr.outputs.number }}"
+          REF="refs/pull/${PR}/merge"
+          [ -z "$PR" ] && REF="$GITHUB_REF_NAME"
+          git fetch -q --depth=1 origin "$REF"
+          git checkout -q FETCH_HEAD
+
+      - name: 组 prompt
+        env:
+          USER_PROMPT: ${{ inputs.prompt }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          if [ -n "$USER_PROMPT" ]; then
+            P="$USER_PROMPT"
+          elif [ -n "$PR_NUMBER" ]; then
+            P="评审本 PR（#${PR_NUMBER}）。步骤：
+          1) 运行 gh pr diff ${PR_NUMBER} 查看全部改动（已提供 GH_TOKEN，仓库即当前仓库）；
+          2) 结合仓库根目录的 AGENTS.md 与 CONTRIBUTING.md 审查：纯只读原则、轮询与线程结构约定、判断层 prompt 措辞红线、测试覆盖是否达标、有无安全隐患；
+          3) 按「必须修 / 建议修 / 可以不修」分级输出意见，指到具体文件与行；
+          4) 把评审结论作为该 PR 的评论提交。
+          只评审：不改代码、不 push、不合并。"
+          else
+            echo "::error::workflow_dispatch 需要填 prompt（或用于自动评审触发）"
+            exit 1
+          fi
+          {
+            echo "PROMPT<<PROMPT_EOF"
+            echo "$P"
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Run agent
         uses: pullfrog/pullfrog@v0
         with:
-          prompt: ${{ inputs.prompt }}
+          prompt: ${{ env.PROMPT }}
         env:
-          # add at least one provider API key
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GOOGLE_GENERATIVE_AI_API_KEY:
-            ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          # 自动评审只挂一把 key；要换 provider 改这一行
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          
-          # for Amazon Bedrock (https://docs.pullfrog.com/bedrock)
-          # AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
-          # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          # AWS_REGION: us-east-1
-          # BEDROCK_MODEL_ID: <bedrock-model-id>
-          
-          # for Google Vertex AI (https://docs.pullfrog.com/vertex)
-          # VERTEX_SERVICE_ACCOUNT_JSON: >-
-          #   ${{ secrets.VERTEX_SERVICE_ACCOUNT_JSON }}
-          # GOOGLE_CLOUD_PROJECT: my-project
-          # VERTEX_LOCATION: global
-          # VERTEX_MODEL_ID: <vertex-model-id>
-
-          # for Azure OpenAI (https://docs.pullfrog.com/azure)
-          # AZURE_RESOURCE_NAME is the <name> in https://<name>.openai.azure.com
-          # AZURE_DEPLOYMENT is your deployment's name, not the model it serves
-          # AZURE_RESOURCE_NAME: my-resource
-          # AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
-          # AZURE_DEPLOYMENT: <deployment-name>
-          # both limits are required — set them to the real limits of that model
-          # AZURE_CONTEXT: "400000"
-          # AZURE_MAX_OUTPUT: "128000"
-
-          # for any OpenAI-compatible endpoint — LiteLLM, Cloudflare AI Gateway,
-          # self-hosted vLLM (https://docs.pullfrog.com/openai-compatible)
-          # OPENAI_COMPATIBLE_BASE_URL: https://litellm.example.com/v1
-          # OPENAI_COMPATIBLE_API_KEY: ${{ secrets.OPENAI_COMPATIBLE_API_KEY }}
-          # OPENAI_COMPATIBLE_MODEL: <model-id>
-          # both limits are required — set them to the real limits of that model
-          # OPENAI_COMPATIBLE_CONTEXT: "128000"
-          # OPENAI_COMPATIBLE_MAX_OUTPUT: "16384"
