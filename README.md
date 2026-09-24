@@ -72,6 +72,8 @@ sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
 
 缺少可用的 uv 时，两种启动入口都先完整下载并执行官方安装脚本（下载含超时和重试），失败后尝试已有的 Homebrew。失败提示区分网络、证书、磁盘和安装器错误，详细输出见 `~/Library/Logs/jev-jarvis.log`。官方脚本安装到 `~/.local/bin`，不修改 shell 配置。
 
+打包版首次启动还会安装 Python 依赖，约占 0.7 GB，网络较慢时需要几分钟；等待 `~/Library/Logs/jev-jarvis.log` 出现「依赖安装完成」即可。准备期间重复点击应用会提示等待，并由最先启动的进程继续完成安装，不会启动未装完依赖的半成品环境或重复打开悬浮窗。
+
 **从源码跑**（微信在运行、终端已授予屏幕录制）：`./start.command`。分层自测：
 
 ```bash

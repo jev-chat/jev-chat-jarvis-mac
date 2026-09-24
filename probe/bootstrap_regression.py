@@ -23,10 +23,13 @@ export TMPDIR="$PWD/tmp"
 export FIXTURE_ROOT="$PWD"
 export TRACE="$PWD/trace"
 mkdir -p "$HOME" "$TMPDIR"
-if [ "$SCENARIO" = existing ]; then
+if [ "$SCENARIO" = existing ] || [ "$SCENARIO" = lock-held ]; then
     mkdir -p "$HOME/.local/bin"
     cp "$FIXTURE_ROOT/uv" "$HOME/.local/bin/uv"
     chmod +x "$HOME/.local/bin/uv"
+fi
+if [ "$SCENARIO" = lock-held ]; then
+    "$FIXTURE_ROOT/hold-install-lock"
 fi
 # bash lacks zsh's print builtin. Production script is unchanged.
 if [ -n "${BASH_VERSION:-}" ]; then
@@ -41,6 +44,13 @@ command() {
         printf '%s\n' brew
     else
         builtin command "$@"
+    fi
+}
+uname() {
+    if [ "${1:-}" = -m ]; then
+        printf '%s\n' arm64
+    else
+        /usr/bin/uname "$@"
     fi
 }
 curl() {
@@ -100,6 +110,38 @@ case "$1" in
 esac
 '''
 
+PYTHON = '#!/bin/sh\n' + CONTEXT_PROBE + r'''
+case "${1:-}" in
+    -c)
+        case "${2:-}" in
+            *sys.version_info*) printf '%s\n' 3.12 ;;
+            *'import objc, AppKit, Quartz, Vision'*)
+                [ "$SCENARIO" != partial-venv ] || exit 1 ;;
+        esac
+        exit 0 ;;
+esac
+echo app-started >> "$TRACE"
+'''
+
+HOLD_INSTALL_LOCK = r'''#!/bin/sh
+set -eu
+support="$HOME/Library/Application Support/jev-jarvis"
+venv="$support/venv"
+lock="$support/venv-install.lock"
+mkdir -p "$lock"
+sleep 2 &
+printf '%s\n' "$!" > "$lock/pid"
+(
+    sleep 1
+    mkdir -p "$venv/bin"
+    cp "$FIXTURE_ROOT/python" "$venv/bin/python"
+    chmod +x "$venv/bin/python"
+    signature="python=3.12 lock=$(shasum -a 256 "$FIXTURE_ROOT/jev test.app/Contents/Resources/app/uv.lock" | awk '{print $1}')"
+    printf '%s\n' "$signature" > "$venv/.jev-ready"
+    rm -rf "$lock"
+) &
+'''
+
 
 def write(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +159,7 @@ def run_launcher(scenario, source=False, context_env=None):
         app = root / "jev test.app/Contents"
         (app / "Resources/app").mkdir(parents=True)
         write(app / "Resources/launcher.zsh", launcher)
+        write(app / "Resources/app/uv.lock", "fixture lock\n")
         write(root / "source/start.command", (ROOT / "start.command").read_text(encoding="utf-8"))
         helper = ROOT / "packaging/bootstrap_uv.sh"
         if helper.exists():
@@ -129,7 +172,9 @@ def run_launcher(scenario, source=False, context_env=None):
                   'export OPENAI_API_KEY="$(printf fixture-key)"\n')
         write(root / "installer", INSTALLER)
         write(root / "uv", UV)
-        write(root / "python", '#!/bin/sh\n' + CONTEXT_PROBE + 'echo app-started >> "$TRACE"\n')
+        write(root / "python", PYTHON)
+        write(root / "hold-install-lock", HOLD_INSTALL_LOCK)
+        (root / "hold-install-lock").chmod(0o755)
         target = "source/start.command" if source else "jev test.app/Contents/Resources/launcher.zsh"
         env = dict(os.environ, SCENARIO=scenario)
         if context_env is not None:
@@ -237,6 +282,21 @@ class BootstrapRegression(unittest.TestCase):
         self.assertIn("installer-ran", trace)
         self.assertIn("brew install uv", trace)
         self.assertIn("app-started", trace)
+
+    def test_partial_venv_never_starts_the_hud(self):
+        completed, trace, log = run_launcher("partial-venv")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("uv sync", trace)
+        self.assertIn("依赖安装未完成", log)
+        self.assertNotIn("app-started", trace)
+
+    def test_waiting_launch_does_not_start_a_second_hud(self):
+        completed, trace, log = run_launcher("lock-held")
+        self.assertEqual(completed.returncode, 0, completed.stderr + log)
+        self.assertIn("另一个启动进程正在安装依赖", log)
+        self.assertIn("本次不重复启动", log)
+        self.assertNotIn("uv sync", trace)
+        self.assertNotIn("app-started", trace)
 
 
 if __name__ == "__main__":

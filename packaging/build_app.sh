@@ -109,6 +109,10 @@ RES="$(cd "$(dirname "$0")" && pwd)"
 SUPPORT="$HOME/Library/Application Support/jev-jarvis"
 CONFIG="$HOME/.config/jev-jarvis"
 VENV="$SUPPORT/venv"
+PY_PIN="@PYTHON_PIN@"
+READY_MARKER="$VENV/.jev-ready"
+INSTALL_LOCK="$SUPPORT/venv-install.lock"
+RECLAIM_LOCK="$SUPPORT/venv-install.reclaim.lock"
 LOG="$HOME/Library/Logs/jev-jarvis.log"
 mkdir -p "$SUPPORT" "$(dirname "$LOG")"
 
@@ -141,28 +145,136 @@ export UV_PROJECT_ENVIRONMENT="$VENV"
 export USE_TF=0                  # laya/transformers: skip the TensorFlow probe
 export HF_HUB_DISABLE_TELEMETRY=1
 
-# The venv must exist AND be the interpreter this bundle pins (@PYTHON_PIN@, written by
-# build_app.sh). uv keeps an existing environment as-is, so a venv built by a different
-# python would silently survive a rebuild — treat a mismatch like a missing venv.
-ready=0
-if [ -x "$VENV/bin/python" ]; then
+# `uv sync` creates venv/bin/python before it has installed PyObjC. A second Finder click
+# must not treat that partial venv as ready and start hud.py without objc (#82).
+lock_digest="$(shasum -a 256 "$RES/app/uv.lock" | awk '{print $1}')" || die "无法读取包内依赖锁文件"
+[ -n "$lock_digest" ] || die "包内依赖锁文件为空"
+ready_signature="python=$PY_PIN lock=$lock_digest"
+
+venv_has_pinned_python() {
+    [ -x "$VENV/bin/python" ] || return 1
     found="$("$VENV/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo '?')"
-    if [ "$found" = "@PYTHON_PIN@" ]; then
-        ready=1
+    [ "$found" = "$PY_PIN" ]
+}
+
+environment_ready() {
+    venv_has_pinned_python || return 1
+    [ -f "$READY_MARKER" ] || return 1
+    [ "$(cat "$READY_MARKER" 2>/dev/null)" = "$ready_signature" ] || return 1
+    "$VENV/bin/python" -c 'import objc, AppKit, Quartz, Vision' >/dev/null 2>&1
+}
+
+write_ready_marker() {
+    local temporary_marker="$READY_MARKER.tmp.$$"
+    print -r -- "$ready_signature" > "$temporary_marker"
+    mv -f "$temporary_marker" "$READY_MARKER"
+}
+
+lock_owner_is_running() {
+    local owner_pid=""
+    [ -f "$INSTALL_LOCK/pid" ] || return 1
+    IFS= read -r owner_pid < "$INSTALL_LOCK/pid" || return 1
+    case "$owner_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$owner_pid" 2>/dev/null
+}
+
+install_lock_is_stale() {
+    local created_at="" now=""
+    [ -d "$INSTALL_LOCK" ] || return 1
+    lock_owner_is_running && return 1
+    created_at="$(stat -f %m "$INSTALL_LOCK" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    [ $((now - created_at)) -ge 30 ]
+}
+
+release_reclaim_lock() {
+    [ "${reclaim_lock_held:-0}" = 1 ] || return 0
+    rmdir "$RECLAIM_LOCK" 2>/dev/null || true
+    reclaim_lock_held=0
+}
+
+release_install_lock() {
+    [ "${install_lock_held:-0}" = 1 ] || return 0
+    rm -rf "$INSTALL_LOCK"
+    install_lock_held=0
+}
+
+install_lock_held=0
+reclaim_lock_held=0
+waited_for_install=0
+installed_here=0
+while ! environment_ready; do
+    if [ -d "$RECLAIM_LOCK" ]; then
+        waited_for_install=1
+        log "另一个启动进程正在恢复依赖安装锁，等待完成"
+        while ! environment_ready && [ -d "$RECLAIM_LOCK" ]; do
+            sleep 1
+        done
+    elif mkdir "$INSTALL_LOCK" 2>/dev/null; then
+        install_lock_held=1
+        print -r -- "$$" > "$INSTALL_LOCK/pid"
+        trap 'release_install_lock' EXIT
+        trap 'release_install_lock; exit 1' HUP INT TERM
+
+        # A newer app version may reuse a Python-compatible venv. Let uv update that
+        # environment in place; only discard it when the pinned interpreter differs.
+        if [ -x "$VENV/bin/python" ] && ! venv_has_pinned_python; then
+            log "虚拟环境是 Python $found，本包需要 $PY_PIN —— 重建"
+            rm -rf "$VENV"
+        fi
+        if ! environment_ready; then
+            installed_here=1
+            log "正在创建虚拟环境并安装依赖（需要几分钟，请保持联网）"
+            osascript -e 'display notification "正在准备运行环境（几分钟，需联网）" with title "jev-chat-jarvis"' >/dev/null 2>&1
+            # --frozen: use the shipped uv.lock exactly, never re-resolve at runtime
+            if ! uv sync --frozen --python "$PY_PIN" --project "$RES/app" --quiet >>"$LOG" 2>&1; then
+                die "依赖安装失败，请查看日志"
+            fi
+            if ! venv_has_pinned_python || ! "$VENV/bin/python" -c 'import objc, AppKit, Quartz, Vision' >/dev/null 2>&1; then
+                die "依赖安装未完成，请查看日志"
+            fi
+            write_ready_marker || die "无法写入依赖就绪标记，请检查磁盘空间和目录权限"
+            log "依赖安装完成"
+        fi
+        release_install_lock
+        trap - EXIT HUP INT TERM
     else
-        log "虚拟环境是 Python $found，本包需要 @PYTHON_PIN@ —— 重建"
+        waited_for_install=1
+        if install_lock_is_stale && mkdir "$RECLAIM_LOCK" 2>/dev/null; then
+            reclaim_lock_held=1
+            trap 'release_reclaim_lock' EXIT
+            trap 'release_reclaim_lock; exit 1' HUP INT TERM
+            # The reclaim lock prevents another waiter from creating a fresh install
+            # lock between this second stale check and the removal below.
+            if install_lock_is_stale; then
+                log "发现遗留的依赖安装锁，准备恢复"
+                rm -rf "$INSTALL_LOCK"
+            fi
+            release_reclaim_lock
+            trap - EXIT HUP INT TERM
+            continue
+        fi
+        log "另一个启动进程正在安装依赖，等待完成"
+        osascript -e 'display notification "另一个启动进程正在准备运行环境，请稍候" with title "jev-chat-jarvis"' >/dev/null 2>&1
+        while ! environment_ready && [ -d "$INSTALL_LOCK" ] && [ ! -d "$RECLAIM_LOCK" ] && ! install_lock_is_stale; do
+            sleep 1
+        done
     fi
+done
+
+# The process which performed the install starts the HUD. Later Finder clicks only wait
+# for it, then exit so they cannot create duplicate floating windows.
+if [ "$waited_for_install" = 1 ] && [ "$installed_here" = 0 ]; then
+    log "依赖已由另一个启动进程准备完成，本次不重复启动"
+    exit 0
 fi
 
-if [ "$ready" = 0 ]; then
-    rm -rf "$VENV"
-    log "正在创建虚拟环境并安装依赖（需要几分钟，请保持联网）"
-    osascript -e 'display notification "正在准备运行环境（几分钟，需联网）" with title "jev-chat-jarvis"' >/dev/null 2>&1
-    # --frozen: use the shipped uv.lock exactly, never re-resolve at runtime
-    if ! uv sync --frozen --python "@PYTHON_PIN@" --project "$RES/app" --quiet >>"$LOG" 2>&1; then
-        die "依赖安装失败，请查看日志"
-    fi
-    log "依赖安装完成"
+# The venv must be fully synchronized with this bundle's lockfile before hud.py starts.
+if [ -x "$VENV/bin/python" ]; then
+    found="$("$VENV/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo '?')"
+    [ "$found" = "$PY_PIN" ] || die "虚拟环境 Python 版本异常，请重新启动应用"
 fi
 
 log "启动 hud.py"
