@@ -18,12 +18,102 @@ import styles
 
 PREFIXES = ("TYPESAFE", "OPENAI", "ANTHROPIC")
 FIELDS = ("API_KEY", "BASE_URL", "MODEL")
+CONTEXT_DEFAULTS = {
+    "JUDGE_CONTEXT_TURNS": 2,
+    "GENERATION_CONTEXT_TURNS": 4,
+}
+CONTEXT_LABELS = {
+    "JUDGE_CONTEXT_TURNS": "判断上下文条数",
+    "GENERATION_CONTEXT_TURNS": "回复生成上下文条数",
+}
+CONTEXT_KEYS = tuple(CONTEXT_DEFAULTS)
+CONTEXT_MIN = 0
+# read_conversation() retains at most 12 bubbles, one of which is the current message.
+CONTEXT_MAX = 11
+APP_DEFAULTS = {
+    "JEV_DEFAULT_TONE_1": "高情商话术",
+    "JEV_DEFAULT_TONE_2": "贴吧老哥 v1.0",
+    "JEV_DEFAULT_TONE_3": "阴阳怪气",
+    "JEV_CANDIDATES_PER_TONE": "2",
+    "JEV_AUTO_HIDE": "1",
+    "JEV_AUTO_DOCK": "1",
+    "JEV_BACKGROUND_CAPTURE": "0",
+    "JEV_PANEL_ALWAYS_ON_TOP": "1",
+}
+APP_KEYS = tuple(APP_DEFAULTS)
+CANDIDATES_MIN = 1
+CANDIDATES_MAX = 5
 DEFAULTS = {
     "TYPESAFE": ("https://api.typesafe.ai", "jev-latest"),
     "OPENAI": ("https://api.openai.com/v1", ""),
     "ANTHROPIC": ("https://api.anthropic.com", ""),
 }
 ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z_0-9]*)(\s*=\s*)(.*)$")
+
+
+def validate_context_turns(value: str, key: str) -> int:
+    """Validate an editable history-bubble count (the current bubble is excluded)."""
+    label = CONTEXT_LABELS.get(key, "上下文条数")
+    try:
+        turns = int(value.strip())
+    except (AttributeError, ValueError):
+        raise ValueError(f"{label}需为 {CONTEXT_MIN}–{CONTEXT_MAX} 的整数。") from None
+    if not CONTEXT_MIN <= turns <= CONTEXT_MAX:
+        raise ValueError(f"{label}需为 {CONTEXT_MIN}–{CONTEXT_MAX} 的整数。")
+    return turns
+
+
+def context_turns(key: str) -> int:
+    """Resolve a startup setting; malformed manual env values safely use the default."""
+    default = CONTEXT_DEFAULTS[key]
+    raw = userconfig.get(key).strip()
+    if not raw:
+        return default
+    try:
+        turns = int(raw)
+    except ValueError:
+        return default
+    return max(CONTEXT_MIN, min(CONTEXT_MAX, turns))
+
+
+def validate_candidate_count(value: str) -> int:
+    try:
+        count = int(str(value).strip())
+    except ValueError:
+        raise ValueError(f"每种沟通类型的候选数需为 {CANDIDATES_MIN}–{CANDIDATES_MAX} 的整数。") from None
+    if not CANDIDATES_MIN <= count <= CANDIDATES_MAX:
+        raise ValueError(f"每种沟通类型的候选数需为 {CANDIDATES_MIN}–{CANDIDATES_MAX} 的整数。")
+    return count
+
+
+def candidate_count() -> int:
+    raw = userconfig.get("JEV_CANDIDATES_PER_TONE").strip()
+    try:
+        return validate_candidate_count(raw or APP_DEFAULTS["JEV_CANDIDATES_PER_TONE"])
+    except ValueError:
+        return int(APP_DEFAULTS["JEV_CANDIDATES_PER_TONE"])
+
+
+def bool_setting(key: str) -> bool:
+    """Resolve an app switch, falling back safely when an env value is malformed."""
+    raw = userconfig.get(key).strip().lower()
+    if not raw:
+        raw = APP_DEFAULTS[key]
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return APP_DEFAULTS[key] == "1"
+
+
+def default_tones(available: dict[str, str], none_label: str, max_slots: int) -> list[str]:
+    """Resolve the persisted startup selections without trusting hand-edited env text."""
+    tones = []
+    for index in range(1, max_slots + 1):
+        key = f"JEV_DEFAULT_TONE_{index}"
+        value = userconfig.get(key).strip() or APP_DEFAULTS.get(key, none_label)
+        tones.append(value if value in available or value == none_label else none_label)
+    return tones
 
 
 def read_document(path: Path) -> str:
@@ -39,9 +129,10 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
         raise ValueError("配置文件已被其他程序修改，请关闭设置窗口后重新打开。")
     # JUDGE_BACKEND is the first-run dialog's choice (judge.download_block_reason);
     # the settings window's offline-model section writes it through the same guarded path.
-    allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS} | {
-        "JUDGE_BACKEND", "JEV_HISTORY", "JEV_CONTEXT_MESSAGES",
-        "JEV_MESSAGE_REGION", "JEV_INPUT_REGION", "JEV_CANDIDATES_PER_TONE"}
+    allowed = ({f"{p}_{f}" for p in PREFIXES for f in FIELDS}
+               | {"JUDGE_BACKEND", "JEV_HISTORY", "JEV_CONTEXT_MESSAGES",
+                  "JEV_MESSAGE_REGION", "JEV_INPUT_REGION"}
+               | set(CONTEXT_KEYS) | set(APP_KEYS))
     if not changes.keys() <= allowed:
         raise ValueError("不支持的配置项。")
     for value in changes.values():

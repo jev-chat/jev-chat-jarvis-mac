@@ -242,6 +242,17 @@ class HudStatusTests(unittest.TestCase):
         h.applyHidden_('没有微信窗口')
         h.panel.orderOut_.assert_called_once()
 
+    def test_auto_hide_can_be_disabled(self):
+        h = hud_harness()()
+        h.rows = {'status': Mock()}
+        h.judge = SimpleNamespace(load_status=None)
+        h.panel, h._ov_panel = Mock(), Mock()
+        h.panel.isVisible.return_value = True
+        h.auto_hide = False
+        h.applyHidden_('微信不在前台')
+        h.panel.orderOut_.assert_not_called()
+        h._ov_panel.orderOut_.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

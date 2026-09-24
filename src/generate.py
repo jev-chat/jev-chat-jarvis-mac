@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -152,19 +153,27 @@ PROMPT_ONE = """刚收到一条微信消息，你要帮我回。
 
 {context_line}消息：「{message}」
 {intent_line}
-请写 {n} 条回复候选，语气统一成下面这一种：
+请写 {n} 条回复候选，语气统一成下面这一种，但各条的胆量要有差别：
 「{tone}」{instruction}
 
 硬性要求：
-- {variation}
-- 每条不超过 30 个字，是微信里打字的语气，不要客套话、不要解释
+- {variation_line}
+- 长度按内容需要决定，是微信里打字的语气，不要客套话、不要解释
+- 消息中若有 [引用 姓名: 内容]，它是旧消息背景；回复当前发送的新内容
+- 内部分句只用半角英文逗号，不用其他标点，结尾不带任何标点
 - 只输出 {n} 行，每行一条，不要编号、不要引号、不要任何前后缀
 - 不要写出语气名称（不要写「{tone}：」这类前缀），直接从回复内容开始"""
+
+REFINE_INSTRUCTIONS = {
+    "缩短": "尽量缩短，保留原回复的核心意思",
+    "更自然": "改得像平时微信打字，去掉套话",
+    "更委婉": "语气更委婉，但保持原回复的立场",
+}
 
 
 def _variation_instruction(count: int) -> str:
     if count == 1:
-        return "只写一条稳妥、可以直接发出去的回复"
+        return "这一条要稳妥、可以直接发出去"
     return "前一条稳妥、可以直接发出去；最后一条把这个语气做足，更皮、更夸张一点也行"
 
 
@@ -191,6 +200,28 @@ def _strip_style_label(s: str) -> str:
 
 def _strip_quotes(s: str) -> str:
     return _QUOTES.sub("", s)
+
+
+def _normalize_reply_punctuation(s: str) -> str:
+    """Keep only ASCII commas as reply punctuation and leave no trailing mark.
+
+    Prompt constraints are advisory and models occasionally return Chinese commas,
+    periods or emphatic punctuation anyway. Normalize every Unicode punctuation run
+    after labels/quotes are removed, so all tones obey the selected chat-writing format.
+    """
+    out = []
+    in_punctuation = False
+    for char in s:
+        if unicodedata.category(char).startswith("P"):
+            if out and not in_punctuation:
+                out.append(",")
+            in_punctuation = True
+        else:
+            out.append(char)
+            in_punctuation = False
+    text = re.sub(r"\s*,\s*", ",", "".join(out).strip())
+    text = re.sub(r",+", ",", text)
+    return text.rstrip(",").strip()
 
 
 _VERSION_SEG = re.compile(r"v\d+[a-z]*")
@@ -525,13 +556,14 @@ class Generator:
             s = _strip_quotes(s)
             s = _strip_style_label(s)
             s = _strip_quotes(s)                     # quotes the label removal exposed
+            s = _normalize_reply_punctuation(s)
             if s:
                 out.append(s.strip())
         return out
 
     def _one_tone(self, message: str, intent: str, tone: str,
                   context: str | None = None,
-                  on_line=None) -> tuple[list[str], str]:
+                  on_line=None, candidate_count: int | None = None) -> tuple[list[str], str]:
         """One request for one tone. Returns (texts, error); never raises.
 
         With `on_line`, each finished line is handed over the moment it completes so the
@@ -542,11 +574,14 @@ class Generator:
         # the last two sentences is usually not a reply to this one sentence in isolation.
         context_line = f"最近的对话：\n{context}\n\n" if context else ""
         intent_line = f"判断出的意图：{intent}\n" if intent else ""
+        requested = styles.PER_TONE if candidate_count is None else int(candidate_count)
+        candidate_count = max(1, min(styles.PER_TONE, requested))
+        variation_line = _variation_instruction(candidate_count)
         prompt = PROMPT_ONE.format(message=message, context_line=context_line,
                                    intent_line=intent_line,
-                                   n=styles.PER_TONE, tone=tone,
+                                   n=candidate_count, tone=tone,
                                    instruction=styles.PRESETS[tone],
-                                   variation=_variation_instruction(styles.PER_TONE))
+                                   variation_line=variation_line)
         emitted = 0
         buf = ""                 # fragments since the last newline
 
@@ -556,7 +591,7 @@ class Generator:
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
                 for text in self._parse(line):
-                    if emitted < styles.PER_TONE:
+                    if emitted < candidate_count:
                         emitted += 1
                         on_line(text)
 
@@ -575,15 +610,29 @@ class Generator:
             # back to one-shot JSON streams nothing at all. Either way the remaining
             # lines go out here, so the panel shows them at this request's end rather
             # than waiting for ranking.
-            for text in self._parse(raw)[emitted:styles.PER_TONE]:
+            for text in self._parse(raw)[emitted:candidate_count]:
                 emitted += 1
                 on_line(text)
-        return self._parse(raw)[:styles.PER_TONE], ""
+        return self._parse(raw)[:candidate_count], ""
+
+    def refine_candidate(self, message: str, original: str, direction: str) -> str:
+        """Rewrite one selected candidate; the rest of the group stays untouched."""
+        if direction not in REFINE_INSTRUCTIONS:
+            raise ValueError("未知的微调方式")
+        prompt = (f"当前微信消息：{message}\n原候选回复：{original}\n"
+                  f"请把原候选回复{REFINE_INSTRUCTIONS[direction]}。"
+                  "不得增加新事实，不改变答应或拒绝的态度。"
+                  "只输出一条改写后的回复，不要解释或编号。"
+                  "分句只用半角英文逗号，结尾不带标点。")
+        replies = self._parse(self._call(prompt))
+        if not replies:
+            raise ValueError("模型没有返回可用的微调结果")
+        return replies[0]
 
     def generate(self, message: str, intent: str = "",
                  slot_tones: list[str] | None = None,
                  context: str | None = None,
-                 on_candidate=None) -> dict:
+                 on_candidate=None, candidate_count: int = 2) -> dict:
         """One concurrent request per selected 话术; returns the candidates grouped by tone.
 
         A tone gets its own request rather than one request listing every tone: asking a
@@ -613,7 +662,8 @@ class Generator:
             def on_line(text: str) -> None:
                 on_candidate(i, tone, text)
             return self._one_tone(message, intent, tone, context,
-                                  on_line if on_candidate is not None else None)
+                                  on_line if on_candidate is not None else None,
+                                  candidate_count)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as ex:
             futures = {i: ex.submit(run, i, tone) for i, tone in active}

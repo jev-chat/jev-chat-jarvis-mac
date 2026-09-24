@@ -151,11 +151,13 @@ class DownloadGateTests(unittest.TestCase):
     def test_unset_allows_cached_model(self):
         # 老用户已下载、从未被引导过：行为与引入本门之前完全一致
         _fake_cache(self.root)
-        self.assertIsNone(self._gate())
+        with mock.patch.object(judge.userconfig, "get", return_value=""):
+            self.assertIsNone(self._gate())
 
     def test_unset_blocks_uncached_model(self):
-        self.assertIsNotNone(self._gate())
-        self.assertIn("TYPESAFE_API_KEY", self._gate())
+        with mock.patch.object(judge.userconfig, "get", return_value=""):
+            self.assertIsNotNone(self._gate())
+            self.assertIn("TYPESAFE_API_KEY", self._gate())
 
     def test_local_allows_download_even_uncached(self):
         session_override("JUDGE_BACKEND", "local")
@@ -170,6 +172,33 @@ class DownloadGateTests(unittest.TestCase):
     def test_skip_blocks_uncached_model(self):
         session_override("JUDGE_BACKEND", "skip")
         self.assertIn("3.8 GB", self._gate())
+
+
+class JudgmentEnablementTests(unittest.TestCase):
+    def enabled(self, backend, has_key=False):
+        with mock.patch('judge_jev.jev_configured', return_value=has_key), \
+                mock.patch.object(judge.userconfig, "get", return_value=backend):
+            return judge.judgment_enabled()
+
+    def test_cloud_without_key_is_disabled(self):
+        self.assertFalse(self.enabled("cloud"))
+
+    def test_skip_without_key_is_disabled(self):
+        self.assertFalse(self.enabled("skip"))
+
+    def test_explicit_local_is_enabled(self):
+        self.assertTrue(self.enabled("local"))
+
+    def test_key_enables_judgment_even_if_cloud_selected(self):
+        self.assertTrue(self.enabled("cloud", has_key=True))
+
+    def test_make_judge_returns_noop_backend_when_disabled(self):
+        with mock.patch('judge_jev.jev_configured', return_value=False), \
+                mock.patch.object(judge, "judgment_enabled", return_value=False):
+            backend = judge.make_judge()
+        self.assertIsInstance(backend, judge.DisabledJudge)
+        self.assertFalse(backend.enabled)
+        self.assertIsNone(backend.load_status)
 
 
 class SettingsWriteTests(unittest.TestCase):

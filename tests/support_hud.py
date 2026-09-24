@@ -16,8 +16,9 @@ from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from perception import TextBlock
+from perception import TextBlock, reply_span, reply_text
 import chat_context
+import settings_config
 import styles
 from judge import LowMemoryError, ModelNotDownloadedError
 
@@ -25,13 +26,18 @@ from judge import LowMemoryError, ModelNotDownloadedError
 def hud_harness():
     tree = ast.parse((ROOT / 'src/hud.py').read_text())
     source = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'HudController')
-    names = {'_work_inner', '_set_foreground_state', '_push', '_reply_task', '_reply_current', '_push_reply',
+    names = {'_work_inner', '_set_foreground_state', '_capture_allowed', 'applySettings_',
+             '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate', '_enqueue_prework',
              '_prejudge_loop', '_pregen_loop', '_analyze', '_run_generation', 'reload_conversations',
              '_context_changed', 'save_background', 'configure_context', 'clear_history',
              '_regen_work', '_regenerate_work', 'regenerateReply_', '_rank_payload', '_payload_from_gen',
-             'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_'}
+             'fillCandidate_', '_warm', '_warm_apps', 'toggleAlwaysOnTop_', 'tick_',
+             '_format_read_result',
+             '_read_result_meta', '_target_text', '_judge_text',
+             'adjustCandidate_', '_adjust_work', 'applyAdjusted_',
+             '_render_groups'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
@@ -43,7 +49,8 @@ def hud_harness():
                                read_conversation=read_conv, locate_input=locate,
                                fill_text=Mock(return_value=(True, '已填入')), warm=Mock(return_value=0.0))
     scope = {'LowMemoryError': LowMemoryError, 'ModelNotDownloadedError': ModelNotDownloadedError,
-             'chat_context': chat_context, 'styles': styles,
+             'chat_context': chat_context, 'settings_config': settings_config, 'styles': styles,
+             'Generator': Mock, 'make_judge': Mock,
              'fill': SimpleNamespace(locate_input=locate, has_accessibility=Mock(return_value=True),
                                      request_accessibility=Mock()),
              'time': time, 'threading': threading, '_log': lambda *_: None,
@@ -54,6 +61,7 @@ def hud_harness():
              'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
              'read_conversation': read_conv,
              'find_wechat_window': Mock(return_value=None),
+             'reply_span': reply_span, 'reply_text': reply_text,
              'PALETTE': {'muted': None, 'red': 'RED', 'green': 'GREEN', 'amber': None},
              'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
              'READ_FAILURE_HIDE_S': 2, 'EMPTY_FRAME_REUSE_S': 2,

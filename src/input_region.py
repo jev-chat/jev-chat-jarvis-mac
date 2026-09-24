@@ -8,9 +8,9 @@ def input_outline(image):
 
     Older WeChat builds draw a closed rectangle around the composer. WeChat 4.x draws
     only its top separator and left divider because the composer ends at the window
-    bottom. Accept either shape, but only let an open-bottom separator qualify when it
-    reaches the right window edge. Coordinates are normalized top-origin; no fixed
-    sidebar width or input height is assumed. Ambiguous frames return None.
+    bottom. Accept either shape only when its remaining edges confirm the separator;
+    a long horizontal rule alone is not enough. Coordinates are normalized top-origin;
+    no fixed sidebar width or input height is assumed. Ambiguous frames return None.
     """
     width, height = Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image)
     w, h = 640, round(height * 640 / width)
@@ -39,23 +39,43 @@ def input_outline(image):
                     best=(start,x)
         return best
     rows = [(y, *run(y)) for y in range(int(h*.50), h-2)]
-    tops = [(right-left, y, left, right) for y,left,right in rows
-            if y < h*.90 and right-left > w*.40]
-    if not tops:
-        return None
-    _, y, left, right = max(tops)
-    bottoms = [(by, bl, br) for by,bl,br in rows
-               if by > max(y+20,h*.90) and abs(bl-left)<12 and abs(br-right)<12]
-    if not bottoms:
-        # WeChat 4.x has no lower stroke: the input panel simply continues to the
-        # bottom of the window. Requiring the detected separator to touch the right
-        # edge keeps message bubbles and other internal rules from becoming targets.
-        if right < w-12 or h-y < max(20,h*.08):
-            return None
-        by, bl, br = h-1, left, w-1
-    else:
-        by, bl, br = max(bottoms)
-    return (min(left,bl)/w, y/h, (max(right,br)-min(left,bl))/w, (by-y)/h)
+    def divider_reaches_bottom(left, top):
+        # A 4.x composer may have no bottom border and its top rule may stop short
+        # of the window edge. Its *left* divider must then remain visible right down
+        # to the bottom. A quoted card or message bubble ends much earlier.
+        if h-top < max(20, h*.08):
+            return False
+        samples = range(top+5, h-4, max(4, (h-top)//18))
+        hits = 0
+        count = 0
+        bottom_hit = False
+        for yy in samples:
+            count += 1
+            edge = any(abs(gray(x,yy)-gray(x+1,yy)) >= 2
+                       for x in range(max(1,left-5), min(w-2,left+5)))
+            hits += edge
+            if yy >= h-max(12, h*.08) and edge:
+                bottom_hit = True
+        return count > 0 and hits >= count*.7 and bottom_hit
+
+    # A long message bubble or quoted-card rule can also span 40% of the window.
+    # Validate an actual lower border or a divider reaching the window bottom before
+    # allowing a candidate to crop the chat OCR region. Prefer the lowest valid top.
+    tops = [(y,left,right) for y,left,right in rows
+            if y < h*.90 and right-left > w*.40 and left < w*.65 and right > w*.78]
+    for y, left, right in sorted(tops, reverse=True):
+        bottoms = [(by, bl, br) for by,bl,br in rows
+                   if by > max(y+20,h*.90) and abs(bl-left)<12 and abs(br-right)<12]
+        if bottoms:
+            by, bl, br = max(bottoms)
+        elif divider_reaches_bottom(left, y):
+            if h-y < max(20,h*.08):
+                continue
+            by, bl, br = h-1, left, w-1
+        else:
+            continue
+        return (min(left,bl)/w, y/h, (max(right,br)-min(left,bl))/w, (by-y)/h)
+    return None
 
 
 def locate_visual_input(win):
