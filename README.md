@@ -204,7 +204,7 @@ Copyright © 2026 eatmoreduck 与 jev-chat 贡献者。代码以 MIT 协议开�
 
 ## 交流反馈
 
-用着有问题、想提需求、想一起改，扫码进群（**1 群已满，从 2 群开始扫，满了顺序换下一个**）；**有新版本发布会在群里和公众号通知，建议关注**；群二维码 7 天失效，过期了在 issue 说一声：
+用着有问题、想提需求、想一起改，扫码进群（**1 群已满，从 2 群开始扫，满了顺序换下一个**）；**有新版本发布会在群里和公众号通知，建议关注**：
 
 <table>
   <tr>
@@ -215,12 +215,11 @@ Copyright © 2026 eatmoreduck 与 jev-chat 贡献者。代码以 MIT 协议开�
   </tr>
 </table>
 
-都满了或者不想进群，直接找我：加个人微信（备注来意），或关注公众号后台私信（新版本发布同样在公众号通知）：
+群满了或二维码过期了？**关注公众号后台私信「进群」，获取最新进群方式**（新版本发布同样在公众号通知）：
 
 <table>
   <tr>
-    <td align="center"><img src="docs/wechat-personal.png" width="200" alt="扫码加个人微信"><br><sub>个人微信</sub></td>
-    <td align="center"><img src="docs/wechat-mp-qr.png" width="200" alt="扫码关注公众号"><br><sub>公众号</sub></td>
+    <td align="center"><img src="docs/wechat-mp-qr.png" width="200" alt="扫码关注公众号"><br><sub>公众号（私信「进群」）</sub></td>
   </tr>
 </table>
 
