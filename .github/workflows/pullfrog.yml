@@ -130,7 +130,7 @@ jobs:
           # 开工评论由服务端在派发 workflow 前发布、不读本 YAML，这里拦不住它
           # 的发布与清理（action.yml 官方说明，715193c 的旧注释理解反了）。
           # 要拦只能走 Pullfrog 控制台 Agent → Comments → Progress comments
-          # （2026-09 已关掉；PR 页面不应再出现 frog[bot] 评论被删的记录）。
+          # （2026-09 已关掉；PR 页面不应再出现 pullfrog[bot] 评论被删的记录）。
           progress_comments: disabled
         env:
           GH_TOKEN: ${{ github.token }}
