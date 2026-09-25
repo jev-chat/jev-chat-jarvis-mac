@@ -143,6 +143,9 @@ class DownloadGateTests(unittest.TestCase):
         self.addCleanup(os.environ.pop, "HF_HOME", None)
         os.environ["HF_HOME"] = str(root)
         self.root = root
+        # 隔离本机真实配置（#133）：「未设置」用例要求 get() 看不到 env 文件与
+        # 真实环境变量里的 JUDGE_BACKEND；空串覆盖会屏蔽全部下层来源
+        session_override("JUDGE_BACKEND", "")
         self.addCleanup(session_override, "JUDGE_BACKEND", "")
 
     def _gate(self):

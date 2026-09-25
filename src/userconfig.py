@@ -152,7 +152,11 @@ _session_overrides: dict[str, str] = {}
 
 
 def session_override(key: str, value: str) -> None:
-    """Make `key` read as `value` for the rest of this process, ahead of every source."""
+    """Make `key` read as `value` for the rest of this process, ahead of every source.
+
+    An explicitly empty `value` blanks the key: later sources are not consulted.
+    The session said "no", so the env file does not get a second vote (#133).
+    """
     _session_overrides[key] = value
 
 
@@ -167,9 +171,15 @@ def _sources() -> list[tuple[str, dict[str, str]]]:
 
 
 def get(*names: str) -> str:
-    """First non-empty value among `names`, searching sources in priority order."""
+    """First non-empty value among `names`, searching sources in priority order.
+
+    A session override wins outright, an empty one included: membership, not
+    truthiness. Truthiness let `""` fall through to the real env file, so a
+    developer with JUDGE_BACKEND=local in ~/.config/jev-jarvis/env failed the
+    offline tests locally (#133).
+    """
     for name in names:
-        if _session_overrides.get(name):
+        if name in _session_overrides:
             return _session_overrides[name]
     for _src, vals in _sources():
         for name in names:
