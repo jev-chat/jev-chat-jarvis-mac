@@ -20,7 +20,9 @@
 #   上下文里的 agent，服务端持钥没有这个暴露面。
 # - checkout 用 dispatch 载荷指定的 ref（控制台按钮发的是 PR merge ref），
 #   **不要改成 fork PR 的 head 代码**。PR 内容对 agent 仍是不可信输入
-#   （prompt 注入面），env 只放权限受限的 github.token。
+#   （prompt 注入面）。github.token 只进 Checkout 步骤；Run agent 步骤
+#   **不放 GH_TOKEN**，否则评审署名从 pullfrog[bot] 变 github-actions[bot]
+#   （实测对照，见该步骤注释）。
 # - prompt 契约（官方硬校验）：with.prompt 必须**原样**写 `${{ inputs.prompt }}`，
 #   不能拼进 env 再传——控制台 dispatch 时会把评审指令填进 inputs.prompt，
 #   action 从 dispatch 载荷恢复 PR 上下文。评审指引放 Pullfrog 控制台的
@@ -80,5 +82,9 @@ jobs:
           # （2026-09 已关掉；PR 页面不应再出现 pullfrog[bot] 评论被删的记录）。
           progress_comments: disabled
         env:
-          GH_TOKEN: ${{ github.token }}
-          # 不放 provider key：凭据由 Pullfrog 服务端持有（见文件头「凭据模型」）
+          # 不要在这里设 GH_TOKEN（2026-09-26 实测对照 panta-log）：设了 action
+          # 就用 GITHUB_TOKEN——github-actions[bot] 身份——提交评审；不设时走
+          # id-token OIDC 由服务端以 pullfrog[bot] App 身份提交（官方模板
+          # 「DO NOT EDIT」形态即不设，评审署名是 frog）。checkout 的 token
+          # 只属于上面 Checkout 步骤。
+          # 也不放 provider key：凭据由 Pullfrog 服务端持有（见文件头「凭据模型」）
