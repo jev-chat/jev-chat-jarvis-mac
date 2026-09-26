@@ -2,8 +2,9 @@
 #
 # PR 的自动评审由 Pullfrog 控制台的 Reviews → Auto-review 驱动（一直启用）：
 # 服务端在新 PR open / ready / 新 commit 推送时，以 workflow_dispatch 派发本
-# workflow（run 名「Review #N」）并自动填好 prompt，评审结论以
-# github-actions[bot] 名义发 review。所以本文件只需保住 workflow_dispatch
+# workflow（run 名「Review #N」，**ref 是 master**——本文件的改动要合并后才
+# 会被后续 dispatch 用到，PR 内无法自验证）并自动填好 prompt，评审结论由
+# 服务端以 pullfrog[bot] App 身份提交。所以本文件只需保住 workflow_dispatch
 # 入口的契约，不要加自动触发器——此前手工挂过 workflow_run 跟进 CI 的路径
 # 从未成功过：pullfrog action 运行时硬性要求 prompt 与 prompt_file 二选一
 # （action.yml："Set exactly one of prompt or prompt_file"），而 workflow_run
@@ -57,8 +58,10 @@ jobs:
     permissions:
       id-token: write       # pullfrog action 服务端认证（见文件头「凭据模型」）
       contents: read
-      issues: write         # 评审结论落 PR 评论（issues API 承载评论）
-      pull-requests: write
+      # 注意：不要给 GITHUB_TOKEN 加 issues/pull-requests 写权限（panta-log
+      # 官方模板也没有）。给了它 action 就自己提交评审——署名落到
+      # github-actions[bot] 头上；保持只写 id-token + 读 contents，
+      # 评审只能由服务端以 pullfrog[bot] App 身份提交（2026-09-26 实测对照）。
     steps:
       - name: Checkout
         env:
