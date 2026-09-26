@@ -84,10 +84,10 @@ jobs:
           # 要拦只能走 Pullfrog 控制台 Agent → Comments → Progress comments
           # （2026-09 已关掉；PR 页面不应再出现 pullfrog[bot] 评论被删的记录）。
           progress_comments: disabled
-        env:
-          # 不要在这里设 GH_TOKEN（2026-09-26 实测对照 panta-log）：设了 action
-          # 就用 GITHUB_TOKEN——github-actions[bot] 身份——提交评审；不设时走
-          # id-token OIDC 由服务端以 pullfrog[bot] App 身份提交（官方模板
-          # 「DO NOT EDIT」形态即不设，评审署名是 frog）。checkout 的 token
-          # 只属于上面 Checkout 步骤。
-          # 也不放 provider key：凭据由 Pullfrog 服务端持有（见文件头「凭据模型」）
+        # 不要在这里设 GH_TOKEN（2026-09-26 实测对照 panta-log）：设了 action
+        # 就用 GITHUB_TOKEN——github-actions[bot] 身份——提交评审；不设时走
+        # id-token OIDC 由服务端以 pullfrog[bot] App 身份提交（官方模板
+        # 「DO NOT EDIT」形态即不设，评审署名是 frog）。checkout 的 token
+        # 只属于上面 Checkout 步骤；也不放 provider key：凭据由 Pullfrog
+        # 服务端持有（见文件头「凭据模型」）。注意不要写成「env: + 纯注释」——
+        # env 键解析为 null，GitHub 会以 Invalid workflow file 拒载（#137 评审）。
