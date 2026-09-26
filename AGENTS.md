@@ -44,3 +44,4 @@
 - AppKit 控件宽度要渲染成 PNG 实测，`cellSize()` 会谎报。
 - 判断模型冷启动 10–20s 是已知问题（见 issue #1 预热方案）；启动后第一条慢是正常现象，别误判成回归。
 - 改动用户可见行为要同步 README；待办与已定方案看 GitHub issues 和 README「下一步」。
+- **workflow 文件里步骤级 `env:` 键不能只留注释**：纯注释子节点解析为 `null`，GitHub 会以 `Invalid workflow file` 拒载整个 workflow（#137 评审拦下的）。pullfrog.yml 这类 dispatch 型 workflow 的改动 **PR 内 CI 绿验证不了**（定义取自 master），GitHub 侧的信号是 push 后 0 秒失败的占位 run；真正验证只能等合并后由下一个 dispatch 完成。
