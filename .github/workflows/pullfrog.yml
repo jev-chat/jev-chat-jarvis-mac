@@ -1,13 +1,16 @@
-# Pullfrog agent：控制台「Review」按钮 / 手动 dispatch 直接跑。
+# Pullfrog agent：自动评审的派发入口 + 控制台「Review」按钮 / 手动 dispatch。
 #
-# 自动 PR 评审不在这里做：那是 Pullfrog 控制台的 first-class 功能
-# （Reviews → Auto-review new PRs，2026-09 起启用）。此前手工挂 workflow_run
-# 跟进 CI 的路径从未成功过——pullfrog action 运行时硬性要求 prompt 与
-# prompt_file 二选一（action.yml："Set exactly one of prompt or prompt_file"），
-# 而 workflow_run 事件没有 inputs，inputs.prompt 展开为空直接失败（上线以来
-# 24 个 workflow_run 0 成功，评审实际全靠 dispatch 在跑）。官方文档明说：
-# "If you want auto PR review ... don't copy a workflow from here — those are
-# first-class Pullfrog features configured in the console."
+# PR 的自动评审由 Pullfrog 控制台的 Reviews → Auto-review 驱动（一直启用）：
+# 服务端在新 PR open / ready / 新 commit 推送时，以 workflow_dispatch 派发本
+# workflow（run 名「Review #N」）并自动填好 prompt，评审结论以
+# github-actions[bot] 名义发 review。所以本文件只需保住 workflow_dispatch
+# 入口的契约，不要加自动触发器——此前手工挂过 workflow_run 跟进 CI 的路径
+# 从未成功过：pullfrog action 运行时硬性要求 prompt 与 prompt_file 二选一
+# （action.yml："Set exactly one of prompt or prompt_file"），而 workflow_run
+# 事件没有 inputs，inputs.prompt 展开为空直接失败（上线以来 24 个 run 0 成功，
+# 只会往 Actions 页面堆假红）。官方文档明说："If you want auto PR review ...
+# don't copy a workflow from here — those are first-class Pullfrog features
+# configured in the console."
 #
 # 凭据模型（实测过，别破坏）：
 # - agent 凭据由 Pullfrog 服务端持有：job 的 id-token: write 是 pullfrog action
