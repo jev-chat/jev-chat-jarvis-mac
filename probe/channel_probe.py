@@ -137,7 +137,7 @@ def probe_ax(bundle: str, dump: bool) -> dict:
     first = report["windows"][0]
     # 判据分三档：窗口都没有 / 只有壳（少量文本、极短）/ 真能读到正文。
     # 只看「有没有文本节点」会把只暴露标题栏的应用误判成 AX 可用。
-    shallow = first["n_text_nodes"] < 8 or first["max_text_len"] < 20
+    shallow = first["n_text_nodes"] < 8 and first["max_text_len"] < 20
     report["ok"] = not shallow
     if not report["ok"]:
         report["reason"] = ("AX 树过浅（文本节点 %d、最长 %d 字符）：疑似只暴露窗口壳，"
@@ -167,7 +167,8 @@ def probe_windows(bundle: str) -> list[dict]:
             "wid": win.get("kCGWindowNumber"),
             "layer": win.get("kCGWindowLayer"),
             "owner": _clean(win.get("kCGWindowOwnerName")),
-            "title": _clean(win.get("kCGWindowName")),
+            # 只保留「有没有标题」，不存标题原文：聊天窗口标题常是联系人名
+            "titled": bool(_clean(win.get("kCGWindowName"))),
             "w": round(float(bounds.get("Width", 0)), 1),
             "h": round(float(bounds.get("Height", 0)), 1),
         })
@@ -179,7 +180,9 @@ def probe_capture(windows: list[dict]) -> dict:
     """挑一个带标题的主窗口试截图，只报像素尺寸，不落盘、不 OCR。"""
     if not windows:
         return {"ok": False, "reason": "没有可截图的窗口"}
-    candidate = next((w for w in windows if w["title"]), windows[0])
+    # CGWindowList 是前到后排序：第一个带标题的窗口就是该应用最前面的主窗口。
+    # 按面积最大的话，独立聊天窗/浮层可能被误当成主窗口。
+    candidate = next((w for w in windows if w["titled"]), windows[0])
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "window.png"
         try:
@@ -188,7 +191,7 @@ def probe_capture(windows: list[dict]) -> dict:
                 capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"ok": False, "reason": f"{type(exc).__name__}"}
-        if proc.returncode != 0 or not out.exists() or out.stat().st_size < 1000:
+        if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             return {"ok": False, "reason": "screencapture 失败（多半缺屏幕录制权限）"}
         source = Quartz.CGImageSourceCreateWithURL(
             AppKit.NSURL.fileURLWithPath_(str(out)), None)
@@ -235,14 +238,24 @@ def main(argv: list[str]) -> int:
     if with_capture and report["screen_capture_allowed"] and not no_capture:
         report["capture"] = probe_capture(report["cgwindows"])
 
-    titled = [w for w in report["cgwindows"] if w["title"]]
-    if report["ax"].get("ok"):
-        verdict = "AX 可读 → 可写 AX 适配器（填入优先 AX 写入 + 读回）"
-    elif titled:
-        verdict = ("AX 不可读 → 转截图 OCR；主窗口：" +
-                   f"{titled[0]['wid']} {titled[0]['w']}x{titled[0]['h']}")
+    titled = [w for w in report["cgwindows"] if w["titled"]]
+    ax = report["ax"]
+    if not report["accessibility_trusted"]:
+        verdict = "AX 未授权：先在系统设置里给本进程开辅助功能权限，再重跑"
+    elif ax.get("ax_windows_after") == 0:
+        verdict = ("AX 未被测通（窗口数 0）：先确认目标应用主窗口已打开并置于前台；"
+                   "仍为 0 才判定 AX 路不通")
+    elif not ax.get("ok"):
+        verdict = f"AX 不可读 → 转截图 OCR；主窗口：" + (
+            f"{titled[0]['wid']} {titled[0]['w']}x{titled[0]['h']}" if titled
+            else "（未找到带标题的窗口）") + f"；AX 原因：{ax.get('reason')}"
+    elif (ax.get("windows") or [{}])[0].get("n_input_controls", 0) == 0:
+        verdict = ("AX 可读但窗口里没有输入控件：读屏可走 AX，填入需视觉/剪贴板兜底"
+                   f"（AX 原因：{ax.get('reason')}）"
+                   if ax.get("reason") else
+                   "AX 可读但窗口里没有输入控件：读屏可走 AX，填入需视觉/剪贴板兜底")
     else:
-        verdict = "AX 不可读，且没有带标题的主窗口：先确认应用打开的是哪个窗口"
+        verdict = "AX 可读 → 可写 AX 适配器（填入优先 AX 写入 + 读回）"
     report["verdict"] = verdict
     _emit(report, as_json)
     return 0
@@ -272,10 +285,12 @@ def _emit(report: dict, as_json: bool) -> None:
     print(f"CG windows        {len(report['cgwindows'])}")
     for w in report["cgwindows"][:8]:
         print(f"  wid={w['wid']} layer={w['layer']} {w['w']}x{w['h']} "
-              f"titled={'yes' if w['title'] else 'no'}")
+              f"titled={'yes' if w['titled'] else 'no'}")
     if "capture" in report:
         c = report["capture"]
         print(f"capture           {'ok ' + str(c.get('pixels')) if c.get('ok') else c.get('reason')}")
+    if ax.get("reason"):
+        print(f"AX reason         {ax['reason']}")
     print(f"verdict           {report['verdict']}")
 
 
