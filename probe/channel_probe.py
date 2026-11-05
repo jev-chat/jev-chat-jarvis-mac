@@ -76,6 +76,15 @@ def _walk(el, depth: int, acc: dict, budget: list[int]) -> None:
                 break
     if role in INPUT_ROLES:
         acc["n_inputs"] += 1
+        # 文本区 != 可写输入控件：文档区、只读预览也可能是 AXTextArea，
+        # 只有 AXValue 可 set 才算「能填入」（与 src/fill.py 的判据一致）
+        try:
+            result = AS.AXUIElementIsAttributeSettable(el, AS.kAXValueAttribute, None)
+            settable = result[1] if isinstance(result, tuple) else bool(result)
+        except Exception:                              # noqa: BLE001
+            settable = False
+        if settable:
+            acc["n_writable_inputs"] += 1
     for child in _attr(el, AS.kAXChildrenAttribute) or []:
         _walk(child, depth + 1, acc, budget)
 
@@ -119,7 +128,8 @@ def probe_ax(bundle: str, dump: bool) -> dict:
         return report
 
     for index, win in enumerate(windows[:3]):
-        acc = {"roles": Counter(), "n_text": 0, "max_text_len": 0, "n_inputs": 0}
+        acc = {"roles": Counter(), "n_text": 0, "max_text_len": 0,
+               "n_inputs": 0, "n_writable_inputs": 0}
         _walk(win, 0, acc, [MAX_NODES])
         entry = {
             "index": index,
@@ -129,6 +139,7 @@ def probe_ax(bundle: str, dump: bool) -> dict:
             "n_text_nodes": acc["n_text"],
             "max_text_len": acc["max_text_len"],
             "n_input_controls": acc["n_inputs"],
+            "n_writable_inputs": acc["n_writable_inputs"],
         }
         if dump:
             entry["roles"] = dict(acc["roles"].most_common(12))
@@ -249,11 +260,12 @@ def main(argv: list[str]) -> int:
         verdict = f"AX 不可读 → 转截图 OCR；主窗口：" + (
             f"{titled[0]['wid']} {titled[0]['w']}x{titled[0]['h']}" if titled
             else "（未找到带标题的窗口）") + f"；AX 原因：{ax.get('reason')}"
-    elif (ax.get("windows") or [{}])[0].get("n_input_controls", 0) == 0:
-        verdict = ("AX 可读但窗口里没有输入控件：读屏可走 AX，填入需视觉/剪贴板兜底"
-                   f"（AX 原因：{ax.get('reason')}）"
-                   if ax.get("reason") else
-                   "AX 可读但窗口里没有输入控件：读屏可走 AX，填入需视觉/剪贴板兜底")
+    elif (ax.get("windows") or [{}])[0].get("n_writable_inputs", 0) == 0:
+        total_inputs = (ax.get("windows") or [{}])[0].get("n_input_controls", 0)
+        verdict = (f"AX 可读但无可写输入控件（文本区 {total_inputs} 个，AXValue 均不可 set）："
+                   "读屏可走 AX，填入需视觉/剪贴板兜底")
+        if ax.get("reason"):
+            verdict += f"（AX 原因：{ax['reason']}）"
     else:
         verdict = "AX 可读 → 可写 AX 适配器（填入优先 AX 写入 + 读回）"
     report["verdict"] = verdict
@@ -279,7 +291,8 @@ def _emit(report: dict, as_json: bool) -> None:
     for w in ax.get("windows", []):
         print(f"  win#{w['index']} role={w['role']} children={w['children']} "
               f"text_nodes={w['n_text_nodes']} max_text_len={w['max_text_len']} "
-              f"inputs={w['n_input_controls']} title_chars={w['title_chars']}")
+              f"inputs={w['n_input_controls']} writable={w['n_writable_inputs']} "
+              f"title_chars={w['title_chars']}")
         if "roles" in w:
             print(f"    roles {w['roles']}")
     print(f"CG windows        {len(report['cgwindows'])}")
