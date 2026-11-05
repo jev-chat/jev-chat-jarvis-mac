@@ -36,8 +36,25 @@ class CalibrationTests(unittest.TestCase):
 
     def test_invalid_regions(self):
         for args in [(600,600,0,0,300,200),(600,600,120,60,500,300),
-                     (600,600,120,60,400,540),(600,600,float('nan'),60,100,100)]:
+                     (600,600,120,60,400,540),(600,600,float('nan'),60,100,100),
+                     (600,600,120,60,450,20),(600,600,120,60,30,100)]:
             with self.subTest(args=args),self.assertRaises(ValueError):Calibration(*args)
+
+    def test_short_input_region_is_savable(self):
+        # #155: an input editor shorter than the old 60pt floor must still be savable
+        from calibration import validate_input_region
+        messages=Calibration(600,600,120,60,450,350)
+        editor=Calibration(600,600,125,420,440,40)
+        validate_input_region(messages,editor)
+        self.assertEqual(Calibration.parse(editor.serialize()),editor)
+
+    def test_message_region_minimum_still_enforced(self):
+        # Only the input region's floor was relaxed; a 40pt-tall message region is
+        # constructible (it may be a saved short editor) but must not pass preview.
+        from calibration import validate_input_region
+        messages=Calibration(600,600,120,60,450,40)
+        editor=Calibration(600,600,125,120,440,100)
+        with self.assertRaises(ValueError):validate_input_region(messages,editor)
 
     def test_short_incoming_and_outgoing_survive(self):
         image=canvas([(160,110,75,36,(.91,.91,.92)),(475,210,65,36,(.6,.94,.56))])

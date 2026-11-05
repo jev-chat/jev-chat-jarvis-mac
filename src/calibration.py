@@ -2,6 +2,15 @@
 from dataclasses import dataclass
 import math
 
+# Region minimums are per purpose. The message region has to hold a conversation
+# (80x60), but an input region only needs to cover the editor — some composers are
+# well under 60pt tall (WhatsApp's is about 40pt, #155), and sharing one threshold
+# made those input regions impossible to save.
+MESSAGE_MIN_WIDTH = 80.0
+MESSAGE_MIN_HEIGHT = 60.0
+INPUT_MIN_WIDTH = 40.0
+INPUT_MIN_HEIGHT = 24.0
+
 
 @dataclass(frozen=True)
 class Calibration:
@@ -16,7 +25,8 @@ class Calibration:
         values = tuple(self.__dict__.values())
         if (not all(math.isfinite(v) for v in values)
                 or self.window_width <= 0 or self.window_height <= 0
-                or self.x < 0 or self.y <= 0 or self.width < 80 or self.height < 60
+                or self.x < 0 or self.y <= 0
+                or self.width < INPUT_MIN_WIDTH or self.height < INPUT_MIN_HEIGHT
                 or self.x + self.width > self.window_width
                 or self.y + self.height >= self.window_height):
             raise ValueError('请框选完整消息区，并排除标题和输入区。')
@@ -41,6 +51,15 @@ class Calibration:
 
 
 def validate_input_region(messages, editor):
+    """Input region must sit under a real message region and cover the editor.
+
+    Construction only enforces the (small) input-region minimums so short editors
+    can be saved; the message region's own minimum is checked here, where the two
+    regions are validated together for preview/save (#155).
+    """
+    if (messages.width < MESSAGE_MIN_WIDTH
+            or messages.height < MESSAGE_MIN_HEIGHT):
+        raise ValueError('消息识别区域太小，请重新框选完整消息区。')
     if (messages.window_width != editor.window_width
             or messages.window_height != editor.window_height
             or editor.y < messages.y+messages.height
