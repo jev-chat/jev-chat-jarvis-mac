@@ -14,6 +14,7 @@ from settings_config import read_document, write_settings
 
 
 def canvas(boxes):
+    """Synthetic chat-pane CGImage: each box is (x, y_top, w, h, rgb)."""
     ctx=Q.CGBitmapContextCreate(None,600,600,8,2400,Q.CGColorSpaceCreateDeviceRGB(),Q.kCGImageAlphaPremultipliedLast)
     Q.CGContextSetRGBFillColor(ctx,.98,.98,.98,1)
     Q.CGContextFillRect(ctx,Q.CGRectMake(0,0,600,600))
@@ -24,6 +25,7 @@ def canvas(boxes):
 
 
 def block(text,x,y,w,h=16):
+    """Synthetic OCR TextBlock in 0..1 window coordinates (Vision bottom-origin)."""
     return TextBlock(text,1,x/600,1-(y+h)/600,w/600,h/600)
 
 
