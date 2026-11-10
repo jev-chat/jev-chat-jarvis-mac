@@ -31,12 +31,14 @@ def block(text,x,y,w,h=16):
 
 class CalibrationTests(unittest.TestCase):
     def test_saved_geometry_and_window_moves(self):
+        """Serialize/parse round-trip and window-size matching."""
         c=Calibration(600,600,120,60,450,480)
         self.assertEqual(Calibration.parse(c.serialize()),c)
         self.assertTrue(c.matches(SimpleNamespace(w=600,h=600,x=900,y=700)))
         self.assertFalse(c.matches(SimpleNamespace(w=601,h=600)))
 
     def test_invalid_regions(self):
+        """Structurally invalid boxes are rejected at construction."""
         # Construction now only rejects structurally impossible geometry; the
         # purpose-specific size minimums live in the validators below.
         for args in [(600,600,0,0,300,200),(600,600,120,60,500,300),
@@ -45,6 +47,7 @@ class CalibrationTests(unittest.TestCase):
             with self.subTest(args=args),self.assertRaises(ValueError):Calibration(*args)
 
     def test_short_input_region_is_savable(self):
+        """An editor below the old 60pt floor can still be saved (#155)."""
         # #155: an input editor shorter than the old 60pt floor must still be savable
         from calibration import validate_input_region
         messages=Calibration(600,600,120,60,450,350)
@@ -55,6 +58,7 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual(Calibration.parse(editor.serialize()),editor)
 
     def test_message_region_minimum_still_enforced(self):
+        """Only the input floor was relaxed; small message regions still fail preview."""
         # Only the input region's floor was relaxed; a 40pt-tall message region is
         # constructible (it may be a saved short editor) but must not pass preview.
         from calibration import validate_input_region
@@ -64,6 +68,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertIn('消息识别区域',str(ctx.exception))
 
     def test_undersized_input_region_names_the_input_region(self):
+        """Short-editor errors must name the input region (#157)."""
         # The Linked-Issues check on #157: a short editor must be reported as the
         # input region, not as the message region.
         from calibration import validate_input_region
@@ -73,42 +78,50 @@ class CalibrationTests(unittest.TestCase):
         self.assertIn('输入区域',str(ctx.exception))
 
     def test_short_incoming_and_outgoing_survive(self):
+        """Short single-line bubbles keep their side."""
         image=canvas([(160,110,75,36,(.91,.91,.92)),(475,210,65,36,(.6,.94,.56))])
         msgs=extract(image,[block('嗯',170,120,16),block('好',485,220,16)],(.2,.1,.75,.8))
         self.assertEqual([(m.text,m.side) for m in msgs],[('嗯','them'),('好','me')])
 
     def test_adjacent_bubbles_never_merge(self):
+        """Adjacent separate bubbles are not merged."""
         image=canvas([(160,110,100,34,(.91,.91,.92)),(160,148,100,34,(.91,.91,.92))])
         msgs=extract(image,[block('第一条',170,119,48),block('第二条',170,157,48)],(.2,.1,.75,.8))
         self.assertEqual([m.text for m in msgs],['第一条','第二条'])
 
     def test_three_lines_fold_only_within_bubble(self):
+        """Only lines inside one bubble fold together."""
         image=canvas([(160,110,100,36,(.91,.91,.92)),(160,190,350,82,(.91,.91,.92))])
         msgs=extract(image,[block('收到',170,120,32),block('第一行',170,200,48),
                             block('第二行',170,224,48),block('第三行',170,248,48)],(.2,.1,.75,.8))
         self.assertEqual([(m.text,m.side) for m in msgs], [('收到','them'),('第一行\n第二行\n第三行','them')])
 
     def test_nickname_is_not_reply_target(self):
+        """A nickname above a bubble is a sender label, not a message."""
         image=canvas([(160,120,110,36,(.91,.91,.92))])
         msgs=extract(image,[block('小王',170,100,24,12),block('哎呀',170,130,32)],(.2,.1,.75,.8))
         self.assertEqual(len(msgs),1)
         self.assertEqual((msgs[0].text,msgs[0].sender),('哎呀','小王'))
 
     def test_unresolved_text_not_deleted_or_guessed(self):
+        """Unresolved ownership keeps the text and marks it unknown."""
         msgs=extract(canvas([]),[block('不知道怎么办',170,120,96)],(.2,.1,.75,.8))
         self.assertEqual([(m.text,m.side) for m in msgs],[('不知道怎么办','unknown')])
 
     def test_sidebar_excluded(self):
+        """Text in the sidebar is excluded from messages."""
         image=canvas([(15,110,90,36,(.91,.91,.92)),(160,110,100,36,(.91,.91,.92))])
         msgs=extract(image,[block('列表摘要',25,120,64),block('消息',170,120,32)],(.2,.1,.75,.8))
         self.assertEqual([m.text for m in msgs],['消息'])
 
     def test_narrow_pane_uses_local_side(self):
+        """Side classification uses local pane anchors when narrow."""
         image=canvas([(410,110,65,36,(.91,.91,.92))])
         msgs=extract(image,[block('是的',420,120,32)],(.65,.1,.33,.8))
         self.assertEqual(msgs[0].side,'them')
 
     def test_dark_bubble(self):
+        """Bubble classification works on a dark background."""
         # Dark background built explicitly; the same relative surface logic applies.
         ctx=Q.CGBitmapContextCreate(None,600,600,8,2400,Q.CGColorSpaceCreateDeviceRGB(),Q.kCGImageAlphaPremultipliedLast)
         Q.CGContextSetRGBFillColor(ctx,.1,.1,.1,1);Q.CGContextFillRect(ctx,Q.CGRectMake(0,0,600,600))
@@ -117,6 +130,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(msgs[0].side,'them')
 
     def test_env_preserves_comments_and_permissions(self):
+        """Env writes keep comments and 0600 permissions."""
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'env';p.write_text('# 我的配置\nCUSTOM=keep\n')
             c=Calibration(600,600,120,60,450,480)
@@ -125,11 +139,13 @@ class CalibrationTests(unittest.TestCase):
             self.assertEqual(p.stat().st_mode&0o777,0o600)
 
     def test_explicit_region_forwarded_to_vision(self):
+        """An explicit OCR region reaches the Vision call."""
         with patch('perception._vision_blocks',return_value=[]) as call:
             ocr_image(canvas([]),region=(.65,.2,.3,.6))
         self.assertEqual(call.call_args.args[-1],(.65,.2,.3,.6))
 
     def test_numeric_recovery_never_guesses_or_duplicates(self):
+        """Numeric bubble recovery is conservative and idempotent."""
         from calibrated_messages import recover_numeric_bubbles
         image=canvas([(160,110,48,36,(.91,.91,.92))])
         digit=TextBlock('1',.5,.2,.3,.25,.4)
@@ -146,6 +162,7 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual(recover_numeric_bubbles(image,[],(.2,.1,.75,.8)),[])
 
     def test_input_selection_must_be_below_messages(self):
+        """Input region must sit below the message region."""
         from calibration import validate_input_region
         messages=Calibration(600,600,120,60,450,350)
         editor=Calibration(600,600,125,420,440,100)
@@ -158,6 +175,7 @@ class CalibrationTests(unittest.TestCase):
 
 class CalibrationHudTests(unittest.TestCase):
     def setUp(self):
+        """Load the real HudController fixture without starting Cocoa."""
         import test_hud_reply
         self.fixture = test_hud_reply.HudReplyTests()
         self.fixture.setUp()
@@ -166,6 +184,7 @@ class CalibrationHudTests(unittest.TestCase):
         self.scope = test_hud_reply.HUD
 
     def test_restart_requires_confirmation_before_read(self):
+        """A required calibration blocks reads until confirmed."""
         self.h._calibration_required = True
         self.h._calibration = None
         self.h._work_inner()
@@ -174,6 +193,7 @@ class CalibrationHudTests(unittest.TestCase):
         self.assertIn('校准', self.h._render.call_args.args[1])
 
     def test_manual_empty_frame_does_not_reuse_old_messages(self):
+        """Empty manual frames never reuse stale messages."""
         from perception import Message
         old = Message('旧消息','them',.3,1)
         self.h._wechat_frontmost = True
@@ -190,6 +210,7 @@ class CalibrationHudTests(unittest.TestCase):
         self.assertEqual(self.h._last_full['messages'],[])
 
     def test_unknown_blocks_never_enter_manual_context(self):
+        """Unknown-side text never reaches context or history."""
         # Unknown-side text must never reach the context store or the model context.
         # After rebasing onto the chat_context architecture (#79), that guarantee lives
         # in the tick's message filtering (filtering inside _context_text would
@@ -208,6 +229,7 @@ class CalibrationHudTests(unittest.TestCase):
         self.assertNotIn('图片内文字', self.h._active_context or '')
 
     def test_manual_target_carries_app_stamp_and_fill_reaches_text(self):
+        """Manual fill target carries the app stamp and reaches fill_text."""
         # #105: the fill guard rejects any target whose `app` stamp mismatches the
         # foreground adapter; the manual-calibration branch must stamp its target
         # like the AX path does, or every fill reports「输入目标属于另一应用」.
