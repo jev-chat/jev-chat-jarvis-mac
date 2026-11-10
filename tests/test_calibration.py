@@ -35,18 +35,22 @@ class CalibrationTests(unittest.TestCase):
         self.assertFalse(c.matches(SimpleNamespace(w=601,h=600)))
 
     def test_invalid_regions(self):
+        # Construction now only rejects structurally impossible geometry; the
+        # purpose-specific size minimums live in the validators below.
         for args in [(600,600,0,0,300,200),(600,600,120,60,500,300),
                      (600,600,120,60,400,540),(600,600,float('nan'),60,100,100),
-                     (600,600,120,60,450,20),(600,600,120,60,30,100)]:
+                     (600,600,120,60,0,100),(600,600,120,60,100,-5)]:
             with self.subTest(args=args),self.assertRaises(ValueError):Calibration(*args)
 
     def test_short_input_region_is_savable(self):
         # #155: an input editor shorter than the old 60pt floor must still be savable
         from calibration import validate_input_region
         messages=Calibration(600,600,120,60,450,350)
-        editor=Calibration(600,600,125,420,440,40)
-        validate_input_region(messages,editor)
-        self.assertEqual(Calibration.parse(editor.serialize()),editor)
+        for editor in (Calibration(600,600,125,420,440,40),
+                       Calibration(600,600,125,420,40,24)):
+            with self.subTest(editor=editor):
+                validate_input_region(messages,editor)
+                self.assertEqual(Calibration.parse(editor.serialize()),editor)
 
     def test_message_region_minimum_still_enforced(self):
         # Only the input region's floor was relaxed; a 40pt-tall message region is
@@ -54,7 +58,17 @@ class CalibrationTests(unittest.TestCase):
         from calibration import validate_input_region
         messages=Calibration(600,600,120,60,450,40)
         editor=Calibration(600,600,125,120,440,100)
-        with self.assertRaises(ValueError):validate_input_region(messages,editor)
+        with self.assertRaises(ValueError) as ctx:validate_input_region(messages,editor)
+        self.assertIn('消息识别区域',str(ctx.exception))
+
+    def test_undersized_input_region_names_the_input_region(self):
+        # The Linked-Issues check on #157: a short editor must be reported as the
+        # input region, not as the message region.
+        from calibration import validate_input_region
+        messages=Calibration(600,600,120,60,450,350)
+        editor=Calibration(600,600,125,420,20,10)
+        with self.assertRaises(ValueError) as ctx:validate_input_region(messages,editor)
+        self.assertIn('输入区域',str(ctx.exception))
 
     def test_short_incoming_and_outgoing_survive(self):
         image=canvas([(160,110,75,36,(.91,.91,.92)),(475,210,65,36,(.6,.94,.56))])
