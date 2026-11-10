@@ -48,7 +48,10 @@ BIDI = "\u200e\u200f\u202a\u202b\u202c"
 
 def _attr(el, name):
     """Read one AX attribute; any error becomes None (the probe never raises)."""
-    err, value = AS.AXUIElementCopyAttributeValue(el, name, None)
+    try:
+        err, value = AS.AXUIElementCopyAttributeValue(el, name, None)
+    except Exception:                                  # noqa: BLE001
+        return None
     return value if err == 0 else None
 
 
@@ -111,11 +114,13 @@ def probe_ax(bundle: str, dump: bool) -> dict:
     except Exception as exc:                            # noqa: BLE001
         # 调用本身抛异常（目标退出 / 权限被拒 / pyobjc 桥接失败）与「成功读到 0 个窗口」
         # 是两件事，单独报告；不要让 traceback 从 probe 里冒出去。
+        # 只记异常类型、不记异常消息：消息里可能带目标应用的标识（联系人/账号），
+        # 其余字段也刻意不落聊天内容。
         return {
             "pid": pid,
             "ok": False,
             "ax_error": None,
-            "ax_exception": f"{type(exc).__name__}: {exc}",
+            "ax_exception": type(exc).__name__,
             "ax_windows": 0,
             "windows": [],
             "reason": ("AX 接口调用抛异常：检查辅助功能权限与目标应用状态；"
