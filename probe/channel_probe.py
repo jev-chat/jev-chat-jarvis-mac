@@ -80,7 +80,9 @@ def _walk(el, depth: int, acc: dict, budget: list[int]) -> None:
     if role in INPUT_ROLES:
         acc["n_inputs"] += 1
         # 文本区 != 可写输入控件：文档区、只读预览也可能是 AXTextArea，
-        # 只有 AXValue 可 set 才算「能填入」（与 src/fill.py 的判据一致）
+        # 只有 AXValue 可 set 才算「能填入」。注意这与 src/fill.py 不是同一判据：
+        # fill.py 选面积最大的 AXTextArea，再靠「写入后读回」确认，从不查 settable；
+        # 这里是静态可写性推断，结论可能比实际填入更宽松。
         try:
             result = AS.AXUIElementIsAttributeSettable(el, AS.kAXValueAttribute, None)
             settable = result[1] if isinstance(result, tuple) else bool(result)
@@ -103,13 +105,28 @@ def probe_ax(bundle: str, dump: bool) -> dict:
     # 纯只读：不写 AXManualAccessibility，也不改目标应用的任何状态。
     # 因此这里看到的是应用「已经暴露」的 AX 树；Electron 应用可能需要用户在别处
     # 主动开启无障碍树，窗口数为 0 只是「当前没暴露」，不能当作不支持 AX 的结论。
-    err, windows = AS.AXUIElementCopyAttributeValue(
-        element, AS.kAXWindowsAttribute, None)
+    try:
+        err, windows = AS.AXUIElementCopyAttributeValue(
+            element, AS.kAXWindowsAttribute, None)
+    except Exception as exc:                            # noqa: BLE001
+        # 调用本身抛异常（目标退出 / 权限被拒 / pyobjc 桥接失败）与「成功读到 0 个窗口」
+        # 是两件事，单独报告；不要让 traceback 从 probe 里冒出去。
+        return {
+            "pid": pid,
+            "ok": False,
+            "ax_error": None,
+            "ax_exception": f"{type(exc).__name__}: {exc}",
+            "ax_windows": 0,
+            "windows": [],
+            "reason": ("AX 接口调用抛异常：检查辅助功能权限与目标应用状态；"
+                       "这不是「不支持 AX」的证据"),
+        }
     windows = windows or []
 
     report = {
         "pid": pid,
         "ax_error": err,
+        "ax_exception": None,
         "ax_windows": len(windows),
         "windows": [],
     }
@@ -253,6 +270,9 @@ def main(argv: list[str]) -> int:
     ax = report["ax"]
     if not report["accessibility_trusted"]:
         verdict = "AX 未授权：先在系统设置里给本进程开辅助功能权限，再重跑"
+    elif ax.get("ax_exception"):
+        verdict = (f"AX 接口调用异常（{ax.get('ax_exception')}）：检查辅助功能权限/目标应用；"
+                   "这不代表 AX 路不通")
     elif ax.get("ax_error") not in (None, 0):
         verdict = (f"AX 接口读取失败（err={ax.get('ax_error')}）：检查辅助功能权限/目标应用；"
                    "这不代表 AX 路不通") + (f"（原因：{ax.get('reason')}）" if ax.get("reason") else "")
@@ -260,7 +280,7 @@ def main(argv: list[str]) -> int:
         verdict = ("AX 窗口数 0：先确认目标应用主窗口已打开并置于前台；"
                    "仍为 0 只说明当前未暴露 AX 树，不等于 AX 路不通")
     elif not ax.get("ok"):
-        verdict = f"AX 不可读 → 转截图 OCR；主窗口：" + (
+        verdict = "AX 不可读 → 转截图 OCR；主窗口：" + (
             f"{titled[0]['wid']} {titled[0]['w']}x{titled[0]['h']}" if titled
             else "（未找到带标题的窗口）") + f"；AX 原因：{ax.get('reason')}"
     elif (ax.get("windows") or [{}])[0].get("n_writable_inputs", 0) == 0:
@@ -291,7 +311,8 @@ def _emit(report: dict, as_json: bool) -> None:
     ax = report["ax"]
     err = ax.get("ax_error")
     print(f"AX windows        {ax.get('ax_windows')}（只读，未写入目标应用）"
-          + (f" · err={err}" if err not in (None, 0) else ""))
+          + (f" · err={err}" if err not in (None, 0) else "")
+          + (f" · exception={ax['ax_exception']}" if ax.get("ax_exception") else ""))
     for w in ax.get("windows", []):
         print(f"  win#{w['index']} role={w['role']} children={w['children']} "
               f"text_nodes={w['n_text_nodes']} max_text_len={w['max_text_len']} "
