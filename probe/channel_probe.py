@@ -109,13 +109,21 @@ def probe_ax(bundle: str, dump: bool) -> dict:
 
     report = {
         "pid": pid,
+        "ax_error": err,
         "ax_windows": len(windows),
         "windows": [],
     }
+    if err != 0:
+        # 接口调用失败（无权限 / 目标无响应 / 应用正在退出）与「成功读到 0 个窗口」
+        # 是两件事：前者不能用来判断 AX 是否可用。
+        report["ok"] = False
+        report["reason"] = (f"AX 接口读取失败（err={err}）：检查辅助功能权限与目标应用状态；"
+                            "这不是「不支持 AX」的证据")
+        return report
     if not windows:
         report["ok"] = False
-        report["reason"] = (f"AX 窗口数为 0（err={err}）：先确认主窗口已打开并置于前台，再重跑；"
-                            "仍为 0 只说明当前没有暴露 AX 树，不等于不支持 AX")
+        report["reason"] = ("AX 接口正常但当前没有暴露窗口：先确认主窗口已打开并置于前台；"
+                            "仍为 0 只说明当前未暴露 AX 树，不等于不支持 AX")
         return report
 
     for index, win in enumerate(windows[:3]):
@@ -245,6 +253,9 @@ def main(argv: list[str]) -> int:
     ax = report["ax"]
     if not report["accessibility_trusted"]:
         verdict = "AX 未授权：先在系统设置里给本进程开辅助功能权限，再重跑"
+    elif ax.get("ax_error") not in (None, 0):
+        verdict = (f"AX 接口读取失败（err={ax.get('ax_error')}）：检查辅助功能权限/目标应用；"
+                   "这不代表 AX 路不通") + (f"（原因：{ax.get('reason')}）" if ax.get("reason") else "")
     elif ax.get("ax_windows") == 0:
         verdict = ("AX 窗口数 0：先确认目标应用主窗口已打开并置于前台；"
                    "仍为 0 只说明当前未暴露 AX 树，不等于 AX 路不通")
@@ -278,7 +289,9 @@ def _emit(report: dict, as_json: bool) -> None:
     print(f"AX trusted        {report['accessibility_trusted']}")
     print(f"screen capture    {report['screen_capture_allowed']}")
     ax = report["ax"]
-    print(f"AX windows        {ax.get('ax_windows')}（只读，未写入目标应用）")
+    err = ax.get("ax_error")
+    print(f"AX windows        {ax.get('ax_windows')}（只读，未写入目标应用）"
+          + (f" · err={err}" if err not in (None, 0) else ""))
     for w in ax.get("windows", []):
         print(f"  win#{w['index']} role={w['role']} children={w['children']} "
               f"text_nodes={w['n_text_nodes']} max_text_len={w['max_text_len']} "
