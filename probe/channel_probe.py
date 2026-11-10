@@ -47,15 +47,18 @@ BIDI = "\u200e\u200f\u202a\u202b\u202c"
 
 
 def _attr(el, name):
+    """Read one AX attribute; any error becomes None (the probe never raises)."""
     err, value = AS.AXUIElementCopyAttributeValue(el, name, None)
     return value if err == 0 else None
 
 
 def _clean(name: str) -> str:
+    """Strip bidi marks around owner/title names (WhatsApp prepends U+200E)."""
     return (name or "").strip().strip(BIDI + " ")
 
 
 def _running(bundle: str):
+    """The running NSRunningApplication for `bundle`, or None when not running."""
     apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle)
     return apps[0] if apps else None
 
@@ -90,41 +93,29 @@ def _walk(el, depth: int, acc: dict, budget: list[int]) -> None:
 
 
 def probe_ax(bundle: str, dump: bool) -> dict:
+    """Read the target application's already-exposed AX tree (read-only, no writes)."""
     app = _running(bundle)
     if app is None:
         return {"ok": False, "reason": "应用未运行"}
 
     pid = app.processIdentifier()
     element = AS.AXUIElementCreateApplication(pid)
-    err_before, windows_before = AS.AXUIElementCopyAttributeValue(
+    # 纯只读：不写 AXManualAccessibility，也不改目标应用的任何状态。
+    # 因此这里看到的是应用「已经暴露」的 AX 树；Electron 应用可能需要用户在别处
+    # 主动开启无障碍树，窗口数为 0 只是「当前没暴露」，不能当作不支持 AX 的结论。
+    err, windows = AS.AXUIElementCopyAttributeValue(
         element, AS.kAXWindowsAttribute, None)
-
-    # Electron 系应用只有设了 AXManualAccessibility 才暴露树；Catalyst 不一定买账，
-    # 所以这里前后各统计一次，结论以「设置之后」为准并保留前后对照。
-    manual_ok = None
-    try:
-        manual_ok = AS.AXUIElementSetAttributeValue(
-            element, "AXManualAccessibility", True) == 0
-        if manual_ok:
-            time.sleep(0.5)
-    except Exception:                     # noqa: BLE001  老系统可能没有这个属性
-        manual_ok = False
-
-    err_after, windows_after = AS.AXUIElementCopyAttributeValue(
-        element, AS.kAXWindowsAttribute, None)
-    windows = windows_after or []
+    windows = windows or []
 
     report = {
         "pid": pid,
-        "ax_windows_before": len(windows_before or []),
-        "ax_windows_after": len(windows),
-        "ax_manual_accessibility": manual_ok,
+        "ax_windows": len(windows),
         "windows": [],
     }
     if not windows:
         report["ok"] = False
-        report["reason"] = (f"AX 窗口数为 0（err before={err_before}, after={err_after}）："
-                            "先确认主窗口已打开并置于前台，再重跑；仍为 0 才是真的不支持 AX")
+        report["reason"] = (f"AX 窗口数为 0（err={err}）：先确认主窗口已打开并置于前台，再重跑；"
+                            "仍为 0 只说明当前没有暴露 AX 树，不等于不支持 AX")
         return report
 
     for index, win in enumerate(windows[:3]):
@@ -214,6 +205,7 @@ def probe_capture(windows: list[dict]) -> dict:
 
 
 def main(argv: list[str]) -> int:
+    """CLI entry: parse args, run the read-only probes, print report and verdict."""
     if len(argv) < 2 or argv[1].startswith("-"):
         print(__doc__.strip().splitlines()[2].strip())
         return 2
@@ -253,9 +245,9 @@ def main(argv: list[str]) -> int:
     ax = report["ax"]
     if not report["accessibility_trusted"]:
         verdict = "AX 未授权：先在系统设置里给本进程开辅助功能权限，再重跑"
-    elif ax.get("ax_windows_after") == 0:
-        verdict = ("AX 未被测通（窗口数 0）：先确认目标应用主窗口已打开并置于前台；"
-                   "仍为 0 才判定 AX 路不通")
+    elif ax.get("ax_windows") == 0:
+        verdict = ("AX 窗口数 0：先确认目标应用主窗口已打开并置于前台；"
+                   "仍为 0 只说明当前未暴露 AX 树，不等于 AX 路不通")
     elif not ax.get("ok"):
         verdict = f"AX 不可读 → 转截图 OCR；主窗口：" + (
             f"{titled[0]['wid']} {titled[0]['w']}x{titled[0]['h']}" if titled
@@ -274,6 +266,7 @@ def main(argv: list[str]) -> int:
 
 
 def _emit(report: dict, as_json: bool) -> None:
+    """Print the report as JSON (`--json`) or as fixed-width human-readable lines."""
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
         return
@@ -285,9 +278,7 @@ def _emit(report: dict, as_json: bool) -> None:
     print(f"AX trusted        {report['accessibility_trusted']}")
     print(f"screen capture    {report['screen_capture_allowed']}")
     ax = report["ax"]
-    print(f"AX windows        before={ax.get('ax_windows_before')} "
-          f"after={ax.get('ax_windows_after')} "
-          f"manual={ax.get('ax_manual_accessibility')}")
+    print(f"AX windows        {ax.get('ax_windows')}（只读，未写入目标应用）")
     for w in ax.get("windows", []):
         print(f"  win#{w['index']} role={w['role']} children={w['children']} "
               f"text_nodes={w['n_text_nodes']} max_text_len={w['max_text_len']} "
